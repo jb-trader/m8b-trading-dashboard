@@ -12,10 +12,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from pathlib import Path
-import config
 import warnings
-import requests  # Also add this for cloud
-from io import BytesIO  # And this
+import requests
+from io import BytesIO
+import config  
+
 warnings.filterwarnings('ignore')
 
 # Try to import optimizer module for data processing
@@ -113,9 +114,6 @@ def get_score_color_style(score):
 # ============================================================================
 # DATA PROCESSING
 # ============================================================================
-
-import requests
-from io import BytesIO
 
 @st.cache_data(ttl=7200)  # Cache for 2 hours
 def load_historical_data(symbol, strategy):
@@ -656,8 +654,21 @@ def main():
         
         if not top_times_df.empty:
             # Get current week dates
-            today = datetime.now()
-            monday = today - timedelta(days=today.weekday())
+            # Get current week dates
+            import pytz
+            et_tz = pytz.timezone('US/Eastern')
+            today_et = datetime.now(et_tz)
+
+            # If it's Friday after 4pm ET or any time on weekend, show next week
+            if (today_et.weekday() == 4 and today_et.hour >= 16) or today_et.weekday() in [5, 6]:
+                # Show next week
+                monday = today_et - timedelta(days=today_et.weekday()) + timedelta(days=7)
+            else:
+                # Show current week
+                monday = today_et - timedelta(days=today_et.weekday())
+
+            # Remove timezone info for display
+            monday = monday.replace(tzinfo=None)
             
             # Create header
             cols = st.columns([1, 2, 2, 2, 2, 2])
