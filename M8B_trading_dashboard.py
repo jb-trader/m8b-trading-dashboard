@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import config
 import warnings
+import requests  # Also add this for cloud
+from io import BytesIO  # And this
 warnings.filterwarnings('ignore')
 
 # Try to import optimizer module for data processing
