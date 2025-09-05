@@ -290,7 +290,7 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
 def main():
     # Page configuration
     st.set_page_config(
-        page_title="Trading Dashboard",
+        page_title="Time Trends Dashboard (TTD)",
         page_icon="📊",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -592,12 +592,15 @@ def main():
     
         # Now display the title with version and data date
         st.markdown(f"""
-        <h1 style='text-align: left; margin-bottom: 0;'>
-            📊 {symbol} {strategy} Trading Dashboard 
-            <span style='font-size: 0.5em; color: #1E90FF; font-weight: normal;'>by jb-trader</span>
-            <span style='font-size: 0.4em; color: #888; font-weight: normal; margin-left: 20px;'>Version 1.0 | Source: M8B v1.37 | Data updated: {latest_data_date}</span>
+        <h1 style='text-align:left;margin-bottom:0'>
+            📊 Time Trends Dashboard (TTD)
+            <span style='font-size:0.5em;color:#1E90FF;font-weight:400;'>by jb-trader</span>
+            <span style='font-size:0.4em;color:#888;font-weight:400;margin-left:20px;'>
+                Version 1.0.0 | Source: M8B v1.37 | Data updated: {latest_data_date}
+            </span>
         </h1>
         """, unsafe_allow_html=True)
+
         st.markdown(f"Analyzing {weeks_history} weeks of historical data | Live updates enabled")
         
         # Calculate metrics
