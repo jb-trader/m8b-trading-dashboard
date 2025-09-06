@@ -1154,10 +1154,10 @@ def main():
                     
                     if mc_results['is_significant']:
                         st.success("✅ **Patterns are STATISTICALLY SIGNIFICANT** (p < 0.05)")
-                        st.write(f"Your patterns perform better than {mc_results['percentile']:.0f}% of random selections")
+                        st.write(f"Your patterns perform better than {mc_results['percentile']:.0f}% of random selections (based on {mc_tester.n_simulations:,} Monte Carlo simulations)")
                     else:
                         st.error("❌ **Patterns are NOT statistically significant** - Could be random chance")
-                    
+                        st.write(f"Based on {mc_tester.n_simulations:,} Monte Carlo simulations")
                     progress_bar.progress(70)
                     
                     # 3. PATTERN STABILITY ANALYSIS
