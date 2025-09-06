@@ -1128,7 +1128,7 @@ def main():
                     grouped = filtered_df.groupby(['Day_of_week', 'Entry_Time'])['Profit'].mean().nlargest(10)
                     best_times = [(day, time) for (day, time) in grouped.index]
                     
-                    mc_tester = MonteCarloTester(filtered_df, n_simulations=1000)
+                    mc_tester = MonteCarloTester(filtered_df, n_simulations=300)
                     mc_results = mc_tester.test_time_pattern_significance(best_times, metric='profit')
                     
                     col1, col2, col3 = st.columns(3)
