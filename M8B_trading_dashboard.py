@@ -175,22 +175,11 @@ def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=Tru
     filtered = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)].copy()
     
     if exclude_fomc:
-        fomc_dates = pd.to_datetime([
-            "2024-01-31", "2024-03-20", "2024-05-01", "2024-06-12",
-            "2024-07-31", "2024-09-18", "2024-11-07", "2024-12-18",
-            "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18"
-        ])
+        fomc_dates = pd.to_datetime(config.FOMC_DATES)
         filtered = filtered[~filtered['Date'].isin(fomc_dates)]
     
     if exclude_earnings:
-        earnings_dates = pd.to_datetime([
-            "2024-01-30", "2024-02-01", "2024-02-21", "2024-03-07",
-            "2024-04-24", "2024-04-25", "2024-04-30", "2024-05-02",
-            "2024-05-22", "2024-06-12", "2024-07-30", "2024-07-31",
-            "2024-08-01", "2024-08-28", "2024-09-05", "2024-10-30",
-            "2024-10-31", "2024-11-20", "2024-12-12", "2025-01-29",
-            "2025-01-30", "2025-02-06", "2025-02-26", "2025-03-06"
-        ])
+        earnings_dates = pd.to_datetime(config.EARNINGS_DATES)
         filtered = filtered[~filtered['Date'].isin(earnings_dates)]
     
     # Filter out late times
@@ -346,24 +335,14 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
         
         # Apply filters
         if exclude_fomc:
-            fomc_dates = pd.to_datetime([
-                "2024-01-31", "2024-03-20", "2024-05-01", "2024-06-12",
-                "2024-07-31", "2024-09-18", "2024-11-07", "2024-12-18",
-                "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18"
-            ])
+            fomc_dates = pd.to_datetime(config.FOMC_DATES)
             training_data = training_data[~training_data['Date'].isin(fomc_dates)]
-        
+
         if exclude_earnings:
-            earnings_dates = pd.to_datetime([
-                "2024-01-30", "2024-02-01", "2024-02-21", "2024-03-07",
-                "2024-04-24", "2024-04-25", "2024-04-30", "2024-05-02",
-                "2024-05-22", "2024-06-12", "2024-07-30", "2024-07-31",
-                "2024-08-01", "2024-08-28", "2024-09-05", "2024-10-30",
-                "2024-10-31", "2024-11-20", "2024-12-12", "2025-01-29",
-                "2025-01-30", "2025-02-06", "2025-02-26", "2025-03-06"
-            ])
+            earnings_dates = pd.to_datetime(config.EARNINGS_DATES)
             training_data = training_data[~training_data['Date'].isin(earnings_dates)]
-        
+            
+                
         # Calculate metrics on training data
         if len(training_data) > 0:
             metrics_df = calculate_metrics_for_times(training_data, contracts)
