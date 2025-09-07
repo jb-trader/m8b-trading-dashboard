@@ -3,6 +3,7 @@
 Real-Time Trading Dashboard
 Automatically updates when any setting changes
 No optimization - direct analysis of historical data
+Version 1.0.1 - Added Forward Testing capability
 """
 
 import streamlit as st
@@ -13,6 +14,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from pathlib import Path
 import warnings
+import re
 import requests
 from io import BytesIO
 import config  
@@ -81,7 +83,6 @@ def calculate_composite_score(metrics, weights):
         score = score / total_weight
     
     return score
-# Add these functions to your METRIC CALCULATIONS section
 
 def calculate_max_drawdown(cumulative_returns):
     """Calculate maximum drawdown from cumulative returns"""
@@ -102,6 +103,7 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0):
         return 0
     
     return np.sqrt(252) * (excess_returns.mean() / excess_returns.std())  # Annualized
+
 def get_score_color_style(score):
     """Return color style based on score value"""
     if score >= 0.70:
@@ -115,40 +117,55 @@ def get_score_color_style(score):
 # DATA PROCESSING
 # ============================================================================
 
-@st.cache_data(ttl=7200)  # Cache for 2 hours
+def _download_drive_bytes(file_id: str) -> bytes:
+    sess = requests.Session()
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    r = sess.get(url, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True, timeout=30)
+    # If Google serves an HTML "confirm" page, follow it
+    if "text/html" in r.headers.get("Content-Type", ""):
+        import re as _re
+        m = _re.search(r'href="([^"]+confirm[^"]+)"', r.text)
+        if m:
+            confirm_url = "https://drive.google.com" + m.group(1).replace("&amp;", "&")
+            r = sess.get(confirm_url, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True, timeout=30)
+    r.raise_for_status()
+    return r.content
+
+@st.cache_data(ttl=7200)
 def load_historical_data(symbol, strategy):
-    """Load and filter historical data from Google Drive"""
+    """Load historical data; try cloud first, fall back to local parquet."""
+    local_path = Path(r"D:/_Documents/Magic 8 Ball/data/dfe_table.parquet")
+    df = pd.DataFrame()
+
+    # Try cloud (Google Drive)
     try:
-        with st.spinner("Loading latest data from cloud..."):
-            url = config.get_data_url()
-            
-            # Download the file
-            response = requests.get(url)
-            
-            if response.status_code == 200:
-                # Read parquet from bytes
-                df = pd.read_parquet(BytesIO(response.content))
-                
-                # Filter for symbol and strategy
-                df = df[(df['Symbol'] == symbol) & (df['Name'] == strategy)].copy()
-                
-                # Convert dates and times
-                df['Date'] = pd.to_datetime(df['Date'])
-                df['Entry_Time'] = pd.to_datetime(df['Entry_Time'], format='%H:%M').dt.time
-                
-                # Show success in sidebar
-                st.sidebar.success("✅ Data loaded")
-                st.sidebar.caption(f"Refreshed: {datetime.now():%H:%M}")
-                
-                return df
-            else:
-                st.error(f"Error downloading data: Status {response.status_code}")
-                return pd.DataFrame()
-                
+        data_bytes = _download_drive_bytes(config.GOOGLE_DRIVE_FILE_ID)
+        df = pd.read_parquet(BytesIO(data_bytes))
+        source = "cloud"
     except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        st.info("Contact @jb-trader in Discord for help")
-        return pd.DataFrame()
+        st.warning(f"Cloud download issue ({e}). Using local file if available.")
+        if local_path.exists():
+            df = pd.read_parquet(local_path)
+            source = "local"
+        else:
+            st.error("No local fallback file found.")
+            return pd.DataFrame()
+
+    # Filter & format
+    df = df[(df['Symbol'] == symbol) & (df['Name'] == strategy)].copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    df['Entry_Time'] = pd.to_datetime(df['Entry_Time'], format='%H:%M').dt.time
+
+    # Sidebar status
+    try:
+        latest_date = df['Date'].max()
+        st.sidebar.success(f"✅ Data loaded from {source}")
+        if pd.notna(latest_date):
+            st.sidebar.caption(f"Latest date: {latest_date:%m/%d/%Y}")
+    except Exception:
+        pass
+
+    return df
 
 def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=True):
     """Filter data for the specified number of weeks"""
@@ -233,9 +250,7 @@ def get_top_times_by_day(metrics_df, weights):
     if top_times:
         return pd.concat(top_times)
     return pd.DataFrame()
-# Add this function to your DATA PROCESSING section
 
-@st.cache_data
 @st.cache_data
 def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52, 
                        exclude_fomc=True, exclude_earnings=True, contracts=1):
@@ -282,6 +297,134 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
         st.error(f"Error finding optimal weeks: {e}")
         return 30  # Default fallback
 
+# ============================================================================
+# FORWARD TESTING FUNCTIONS
+# ============================================================================
+
+def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter, 
+                     active_weights, contracts, starting_balance,
+                     exclude_fomc=True, exclude_earnings=True):
+    """Run walk-forward testing simulation"""
+    
+    # Sort data by date
+    df = df.sort_values('Date').copy()
+    
+    # Get date range
+    min_date = df['Date'].min()
+    max_date = df['Date'].max()
+    
+    # Initialize results
+    equity_curve = []
+    trades_log = []
+    retraining_log = []
+    current_balance = starting_balance
+    
+    # Calculate total weeks available
+    total_weeks = (max_date - min_date).days // 7
+    
+    # Start walk-forward process
+    current_start = min_date
+    
+    while current_start < max_date:
+        # Define training period
+        training_end = current_start + timedelta(weeks=training_weeks)
+        
+        # Define trading period
+        trading_start = training_end
+        trading_end = trading_start + timedelta(weeks=trading_weeks)
+        
+        # Ensure we don't go beyond available data
+        if trading_end > max_date:
+            trading_end = max_date
+        
+        # Skip if not enough data
+        if trading_start >= max_date:
+            break
+        
+        # Get training data
+        training_data = df[(df['Date'] >= current_start) & (df['Date'] < training_end)].copy()
+        
+        # Apply filters
+        if exclude_fomc:
+            fomc_dates = pd.to_datetime([
+                "2024-01-31", "2024-03-20", "2024-05-01", "2024-06-12",
+                "2024-07-31", "2024-09-18", "2024-11-07", "2024-12-18",
+                "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18"
+            ])
+            training_data = training_data[~training_data['Date'].isin(fomc_dates)]
+        
+        if exclude_earnings:
+            earnings_dates = pd.to_datetime([
+                "2024-01-30", "2024-02-01", "2024-02-21", "2024-03-07",
+                "2024-04-24", "2024-04-25", "2024-04-30", "2024-05-02",
+                "2024-05-22", "2024-06-12", "2024-07-30", "2024-07-31",
+                "2024-08-01", "2024-08-28", "2024-09-05", "2024-10-30",
+                "2024-10-31", "2024-11-20", "2024-12-12", "2025-01-29",
+                "2025-01-30", "2025-02-06", "2025-02-26", "2025-03-06"
+            ])
+            training_data = training_data[~training_data['Date'].isin(earnings_dates)]
+        
+        # Calculate metrics on training data
+        if len(training_data) > 0:
+            metrics_df = calculate_metrics_for_times(training_data, contracts)
+            
+            if not metrics_df.empty:
+                # Get top times based on training data
+                top_times_df = get_top_times_by_day(metrics_df, active_weights)
+                
+                if not top_times_df.empty:
+                    # Get selected rank times
+                    selected_times = top_times_df[top_times_df['rank'] == rank][['Day_of_week', 'Entry_Time']]
+                    
+                    # Log retraining
+                    retraining_log.append({
+                        'Training Start': current_start,
+                        'Training End': training_end,
+                        'Trading Start': trading_start,
+                        'Trading End': trading_end,
+                        'Selected Times': len(selected_times)
+                    })
+                    
+                    # Get trading data
+                    trading_data = df[(df['Date'] >= trading_start) & (df['Date'] < trading_end)].copy()
+                    
+                    # Apply day filter if specified
+                    if day_filter != "All Days":
+                        trading_data = trading_data[trading_data['Day_of_week'] == day_filter]
+                    
+                    # Filter for selected times
+                    valid_times = set(zip(selected_times['Day_of_week'], selected_times['Entry_Time']))
+                    trading_data = trading_data[
+                        trading_data.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_times, axis=1)
+                    ]
+                    
+                    # Execute trades and update balance
+                    for _, trade in trading_data.iterrows():
+                        profit = trade['Profit'] * contracts
+                        current_balance += profit
+                        
+                        equity_curve.append({
+                            'Date': trade['Date'],
+                            'Balance': current_balance,
+                            'Profit': profit
+                        })
+                        
+                        trades_log.append({
+                            'Date': trade['Date'],
+                            'Day': trade['Day_of_week'],
+                            'Time': trade['Entry_Time'],
+                            'Profit': profit
+                        })
+        
+        # Move to next period
+        current_start = current_start + timedelta(weeks=trading_weeks)
+    
+    # Convert to DataFrames
+    equity_df = pd.DataFrame(equity_curve) if equity_curve else pd.DataFrame()
+    trades_df = pd.DataFrame(trades_log) if trades_log else pd.DataFrame()
+    retraining_df = pd.DataFrame(retraining_log) if retraining_log else pd.DataFrame()
+    
+    return equity_df, trades_df, retraining_df
 
 # ============================================================================
 # MAIN APPLICATION
@@ -296,10 +439,10 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS
+    # Custom CSS - only apply gradient to sidebar slider
     st.markdown("""
     <style>
-    .stSlider > div > div {
+    [data-testid="stSidebar"] .stSlider > div > div {
         background: linear-gradient(to right, #ff4444 0%, #ffff00 50%, #44ff44 100%);
     }
     .metric-value {
@@ -347,6 +490,7 @@ def main():
                 st.session_state.optimal_weeks = optimal_weeks
                 st.session_state.last_symbol = symbol
                 st.session_state.last_strategy = strategy
+        
         # Check if reset was clicked
         if 'reset_to_optimal' not in st.session_state:
             st.session_state.reset_to_optimal = False
@@ -357,9 +501,6 @@ def main():
             st.session_state.reset_to_optimal = False  # Reset the flag
         else:
             slider_value = st.session_state.get('weeks_history', st.session_state.optimal_weeks)
-        
-        # Display optimization info
-        col1, col2 = st.columns([3, 1])        
         
         # Display optimization info
         col1, col2 = st.columns([3, 1])
@@ -380,11 +521,11 @@ def main():
                     st.rerun()
         
         # Show optimization details
-
         if weeks_history == st.session_state.optimal_weeks:
             st.success(f"✨ Using optimal period for Avg Profit ({weeks_history} weeks)")
         else:
             st.info(f"📊 Custom period (Optimal Avg Profit: {st.session_state.optimal_weeks} weeks)")
+        
         with st.expander("ℹ️ What does 'Optimal' mean?", expanded=False):
             st.markdown(f"""
             **Understanding the Optimal Period:**
@@ -397,11 +538,6 @@ def main():
             - This is based on your current filter settings (FOMC, earnings, etc.)
             
             **Current Selection: {weeks_history} weeks**
-            - You're using a custom period different from the optimal
-            - This might be useful for:
-            • Testing consistency across different timeframes
-            • Avoiding overfitting to a specific period
-            • Analyzing recent vs. longer-term patterns
             
             **Important Notes:**
             - "Optimal" is based on historical data only
@@ -444,6 +580,7 @@ def main():
                             optimal_row = analysis_df[analysis_df['Weeks'] == st.session_state.optimal_weeks]
                             if not optimal_row.empty:
                                 st.success(f"🎯 Optimal: {st.session_state.optimal_weeks} weeks")
+        
         # Metric Weights
         st.subheader("⚖️ Metric Weights")
         st.caption("Adjust importance of each metric")
@@ -568,7 +705,7 @@ def main():
             key="starting_balance"
         )
     
-# ========== MAIN CONTENT AREA ==========
+    # ========== MAIN CONTENT AREA ==========
    
     # Load data first to get the latest date
     with st.spinner("Loading data..."):
@@ -596,7 +733,7 @@ def main():
             📊 Time Trends Dashboard (TTD)
             <span style='font-size:0.5em;color:#1E90FF;font-weight:400;'>by jb-trader</span>
             <span style='font-size:0.4em;color:#888;font-weight:400;margin-left:20px;'>
-                Version 1.0.0 | Source: M8B v1.37 | Data updated: {latest_data_date}
+                Version 1.2.0 | Source: M8B v1.37 | Data updated: {latest_data_date}
             </span>
         </h1>
         """, unsafe_allow_html=True)
@@ -616,15 +753,16 @@ def main():
         top_times_df = get_top_times_by_day(metrics_df, active_weights)
     
     # Create tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([  # Add tab5 here
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🎯 Best Times",
         "📈 Performance",
+        "🔄 Forward Testing",
         "📊 Analysis",
         "📋 All Times",
         "✅ Validation"
     ])
     
-        # ========== TAB 1: BEST TIMES ==========
+    # ========== TAB 1: BEST TIMES ==========
     with tab1:
         st.subheader("🎯 Top 3 Trading Times by Day")
         
@@ -656,7 +794,6 @@ def main():
             """)
         
         if not top_times_df.empty:
-            # Get current week dates
             # Get current week dates
             import pytz
             et_tz = pytz.timezone('US/Eastern')
@@ -734,7 +871,7 @@ def main():
                 display_df['Profit Factor'] = display_df['Profit Factor'].round(2)
                 
                 # Define the styling function
-                def style_scores(df):
+                def style_scores(df_to_style):
                     """Apply color styling to score column"""
                     def color_score(val):
                         if isinstance(val, (int, float)):
@@ -746,16 +883,18 @@ def main():
                                 return 'background-color: #87CEEB; color: black; font-weight: bold'
                         return ''
                     
-                    return df.style.applymap(color_score, subset=['Score'])
+                    return df_to_style.style.map(color_score, subset=['Score'])
                 
                 # Display with styling
                 styled_df = style_scores(display_df)
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
         else:
             st.warning("Not enough data to display top times")
+    
     # ========== TAB 2: PERFORMANCE ==========
     with tab2:
         st.subheader("📈 Historical Performance - Maybe This Trend Will Continue")
+        
         # Add important disclaimer
         with st.expander("⚠️ **IMPORTANT: Understanding These Results**", expanded=False):
             st.warning("""
@@ -790,27 +929,82 @@ def main():
             characteristics, not in expecting these exact returns. If these patterns persist, these times *may* continue 
             to offer an edge, but there's no guarantee.
             """)
+        
         if not filtered_df.empty and not top_times_df.empty:
-            # Add rank selector
-            col1, col2, col3 = st.columns([2, 3, 5])
+            # Add performance filters row WITHOUT using containers that cause tab switching
+            col1, col2, col3, col4, col5 = st.columns([2, 2, 3, 1, 1])
+            
             with col1:
+                # Use a form to prevent immediate rerun
                 selected_rank = st.selectbox(
                     "Select Rank",
                     options=[1, 2, 3],
                     format_func=lambda x: f"{'1st' if x == 1 else '2nd' if x == 2 else '3rd'} Rank Times",
-                    key="rank_selector"
+                    key="perf_rank_selector"
                 )
             
+            with col2:
+                days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+                selected_day = st.selectbox(
+                    "Day of Week",
+                    options=["All Days"] + days_order,
+                    key="perf_day_selector"
+                )
+            
+            with col3:
+                perf_weeks = st.slider(
+                    "Date Range (weeks)",
+                    min_value=4,
+                    max_value=52,
+                    value=weeks_history,
+                    key="perf_weeks_slider",
+                    label_visibility="visible"
+                )
+            
+            with col4:
+                perf_exclude_fomc = st.checkbox(
+                    "Exclude FOMC",
+                    value=exclude_fomc,
+                    key="perf_exclude_fomc"
+                )
+            
+            with col5:
+                perf_exclude_earnings = st.checkbox(
+                    "Exclude Earnings",
+                    value=exclude_earnings,
+                    key="perf_exclude_earnings"
+                )
+            
+            # Apply performance-specific filters
+            perf_filtered_df = filter_data_by_weeks(
+                df, 
+                perf_weeks, 
+                perf_exclude_fomc, 
+                perf_exclude_earnings
+            )
+            
+            # Recalculate metrics if filters changed
+            if perf_weeks != weeks_history or perf_exclude_fomc != exclude_fomc or perf_exclude_earnings != exclude_earnings:
+                perf_metrics_df = calculate_metrics_for_times(perf_filtered_df, contracts)
+                perf_top_times_df = get_top_times_by_day(perf_metrics_df, active_weights)
+            else:
+                perf_top_times_df = top_times_df
+                perf_filtered_df = filtered_df
+            
             # Filter data based on selected rank times
-            rank_times = top_times_df[top_times_df['rank'] == selected_rank][['Day_of_week', 'Entry_Time']]
+            rank_times = perf_top_times_df[perf_top_times_df['rank'] == selected_rank][['Day_of_week', 'Entry_Time']]
             
             # Create a set of (day, time) tuples for filtering
             valid_times = set(zip(rank_times['Day_of_week'], rank_times['Entry_Time']))
             
             # Filter the original data to only include trades at the selected rank times
-            rank_filtered_df = filtered_df[
-                filtered_df.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_times, axis=1)
+            rank_filtered_df = perf_filtered_df[
+                perf_filtered_df.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_times, axis=1)
             ].copy()
+            
+            # Apply day filter if not "All Days"
+            if selected_day != "All Days":
+                rank_filtered_df = rank_filtered_df[rank_filtered_df['Day_of_week'] == selected_day].copy()
             
             if not rank_filtered_df.empty:
                 # Calculate cumulative P&L
@@ -820,12 +1014,12 @@ def main():
                 # Create equity curve
                 fig = go.Figure()
                 
-                # Add the equity curve for selected rank
+                # Add the equity curve for selected rank and day
                 fig.add_trace(go.Scatter(
                     x=rank_filtered_df['Date'],
                     y=starting_balance + rank_filtered_df['Cumulative_PL'],
                     mode='lines',
-                    name=f'Equity (Rank {selected_rank})',
+                    name=f'Equity (Rank {selected_rank}, {selected_day})',
                     line=dict(color='green', width=4)
                 ))
                 
@@ -838,7 +1032,7 @@ def main():
                 )
                 
                 fig.update_layout(
-                    title=f"Equity Curve - Using {'1st' if selected_rank == 1 else '2nd' if selected_rank == 2 else '3rd'} Rank Trading Times",
+                    title=f"Equity Curve - {'1st' if selected_rank == 1 else '2nd' if selected_rank == 2 else '3rd'} Rank Times - {selected_day} ({perf_weeks} weeks)",
                     xaxis_title="Date",
                     yaxis_title="Account Value ($)",
                     yaxis_tickformat='$,.0f',
@@ -874,20 +1068,27 @@ def main():
                 col4.metric("Worst Trade", f"${worst_trade:,.0f}")
                 
                 # Show which times are being used
-                with st.expander(f"📅 Trading Times Used (Rank {selected_rank})"):
+                with st.expander(f"📅 Trading Times Used (Rank {selected_rank}, {selected_day})"):
                     times_display = rank_times.copy()
+                    
+                    # Filter by selected day if not "All Days"
+                    if selected_day != "All Days":
+                        times_display = times_display[times_display['Day_of_week'] == selected_day]
+                    
                     times_display['Entry_Time'] = times_display['Entry_Time'].apply(lambda x: x.strftime('%H:%M'))
                     times_display = times_display.sort_values(['Day_of_week', 'Entry_Time'])
                     
                     # Create a formatted display
-                    days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
                     times_by_day = []
                     for day in days_order:
                         day_time = times_display[times_display['Day_of_week'] == day]
                         if not day_time.empty:
                             times_by_day.append(f"**{day}**: {day_time['Entry_Time'].iloc[0]}")
                     
-                    st.markdown(" | ".join(times_by_day))
+                    if times_by_day:
+                        st.markdown(" | ".join(times_by_day))
+                    else:
+                        st.markdown(f"**{selected_day}**: {times_display['Entry_Time'].iloc[0] if not times_display.empty else 'N/A'}")
                 
                 # Monthly breakdown
                 st.subheader("Monthly Performance")
@@ -904,7 +1105,7 @@ def main():
                     y='Profit',
                     color='Profit',
                     color_continuous_scale=['red', 'yellow', 'green'],
-                    title=f"Monthly P&L (Rank {selected_rank} Times)"
+                    title=f"Monthly P&L (Rank {selected_rank} Times, {selected_day})"
                 )
                 fig.update_layout(showlegend=False, height=350)
                 st.plotly_chart(fig, use_container_width=True)
@@ -914,12 +1115,16 @@ def main():
                     comparison_data = []
                     
                     for rank in [1, 2, 3]:
-                        rank_times_comp = top_times_df[top_times_df['rank'] == rank][['Day_of_week', 'Entry_Time']]
+                        rank_times_comp = perf_top_times_df[perf_top_times_df['rank'] == rank][['Day_of_week', 'Entry_Time']]
                         valid_times_comp = set(zip(rank_times_comp['Day_of_week'], rank_times_comp['Entry_Time']))
                         
-                        rank_df_comp = filtered_df[
-                            filtered_df.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_times_comp, axis=1)
+                        rank_df_comp = perf_filtered_df[
+                            perf_filtered_df.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_times_comp, axis=1)
                         ].copy()
+                        
+                        # Apply day filter if not "All Days"
+                        if selected_day != "All Days":
+                            rank_df_comp = rank_df_comp[rank_df_comp['Day_of_week'] == selected_day]
                         
                         if not rank_df_comp.empty:
                             total_profit_comp = rank_df_comp['Profit'].sum() * contracts
@@ -937,12 +1142,277 @@ def main():
                     if comparison_data:
                         comparison_df = pd.DataFrame(comparison_data)
                         st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+                        st.caption(f"Filtered by: {selected_day} | {perf_weeks} weeks")
             else:
-                st.warning(f"No trades found for Rank {selected_rank} times in the selected period")
+                st.warning(f"No trades found for Rank {selected_rank} times on {selected_day}")
         else:
             st.warning("Not enough data to display performance metrics")
-    # ========== TAB 3: ANALYSIS ==========
+    
+    # ========== TAB 3: FORWARD TESTING ==========
     with tab3:
+        st.subheader("🔄 Forward Testing - Realistic Walk-Forward Analysis")
+        
+        # Add explanation dropdown
+        with st.expander("📘 **Understanding Forward Testing Results**", expanded=False):
+            st.info("""
+            **What Is Forward Testing?**
+            
+            This tab shows how the strategy would have performed in REAL TRADING conditions, where you can only use past data to make decisions about the future. This is fundamentally different from the Performance tab.
+            
+            **Key Difference from Performance Tab:**
+            - **Performance Tab**: Shows results using "perfect hindsight" - the best times are identified using ALL the data, then performance is calculated on that same data. This creates unrealistic expectations.
+            - **Forward Testing Tab**: Shows realistic results - best times are identified using ONLY past data, then traded forward into unknown future data. This mimics actual trading conditions.
+            
+            **How The Process Works:**
+            1. **Training Period**: Uses X weeks of historical data to identify the best trading times
+            2. **Trading Period**: Trades those times for Y weeks into the future (without knowing if they'll work)
+            3. **Retrain**: After the trading period, retrain using the next window of data
+            4. **Repeat**: Continue rolling forward through all available data
+            
+            **How to Use These Settings:**
+            
+            **Training Window (4-26 weeks)**
+            - Shorter (4-8 weeks): More responsive to recent patterns, but may overfit to noise
+            - Medium (12-16 weeks): Balanced approach, recommended starting point
+            - Longer (20+ weeks): More stable patterns, but slow to adapt to market changes
+            
+            **Trading Window (1-8 weeks)**
+            - Shorter (1-2 weeks): Frequent retraining, adapts quickly but higher transaction costs
+            - Medium (3-4 weeks): Good balance between adaptation and stability
+            - Longer (6-8 weeks): Less frequent changes, but risk using stale patterns
+            
+            **What to Look For:**
+            ✅ **Good Signs:**
+            - Forward test equity curve stays close to hindsight curve
+            - Consistent upward trend even with retraining
+            - Performance degradation < 30%
+            
+            ⚠️ **Warning Signs:**
+            - Large gap between forward test and hindsight curves
+            - Equity curve flattens or declines after retraining
+            - Performance degradation > 50%
+            - Wildly different "best times" after each retraining
+            
+            **Reality Check:**
+            If forward testing shows significantly worse results than the Performance tab, the patterns are likely overfitted to historical noise rather than capturing genuine market behavior. Only trade strategies that show robust forward-testing results.
+            
+            💡 **Pro Tip**: Try multiple Training/Trading window combinations. If results vary wildly, the patterns are unstable and should not be traded with real money.
+            """)
+        
+        # Forward testing controls
+        col1, col2, col3, col4, col5, col6, col7 = st.columns([1.5, 1.5, 1.5, 1.5, 2, 1, 1])
+        
+        with col1:
+            training_weeks = st.slider(
+                "Training Window",
+                min_value=4,
+                max_value=26,
+                value=12,
+                key="fwd_training_weeks",
+                help="Weeks of historical data to identify patterns"
+            )
+        
+        with col2:
+            trading_weeks = st.slider(
+                "Trading Window",
+                min_value=1,
+                max_value=8,
+                value=4,
+                key="fwd_trading_weeks",
+                help="Weeks to trade before retraining"
+            )
+        
+        with col3:
+            fwd_rank = st.selectbox(
+                "Select Rank",
+                options=[1, 2, 3],
+                format_func=lambda x: f"{'1st' if x == 1 else '2nd' if x == 2 else '3rd'} Rank",
+                key="fwd_rank_selector"
+            )
+        
+        with col4:
+            days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+            fwd_day = st.selectbox(
+                "Day of Week",
+                options=["All Days"] + days_order,
+                key="fwd_day_selector"
+            )
+        
+        with col5:
+            fwd_weeks_range = st.slider(
+                "Date Range (weeks)",
+                min_value=training_weeks + trading_weeks,
+                max_value=52,
+                value=min(30, max(20, training_weeks + trading_weeks * 2)),
+                key="fwd_weeks_range",
+                help="Total weeks of data to use for forward testing"
+            )
+        
+        with col6:
+            fwd_exclude_fomc = st.checkbox(
+                "Exclude FOMC",
+                value=exclude_fomc,
+                key="fwd_exclude_fomc"
+            )
+        
+        with col7:
+            fwd_exclude_earnings = st.checkbox(
+                "Exclude Earnings",
+                value=exclude_earnings,
+                key="fwd_exclude_earnings"
+            )
+        
+        # Run forward test button
+        if st.button("Run Forward Test", type="primary", key="run_forward_test"):
+            with st.spinner("Running forward test simulation..."):
+                # Get data for forward testing
+                fwd_test_df = filter_data_by_weeks(df, fwd_weeks_range, False, False)  # Don't filter here, do it in the function
+                
+                # Run forward test
+                equity_df, trades_df, retraining_df = run_forward_test(
+                    fwd_test_df,
+                    training_weeks,
+                    trading_weeks,
+                    fwd_rank,
+                    fwd_day,
+                    active_weights,
+                    contracts,
+                    starting_balance,
+                    fwd_exclude_fomc,
+                    fwd_exclude_earnings
+                )
+                
+                if not equity_df.empty:
+                    # Create comparison with hindsight results
+                    hindsight_filtered = filter_data_by_weeks(
+                        df, 
+                        fwd_weeks_range, 
+                        fwd_exclude_fomc, 
+                        fwd_exclude_earnings
+                    )
+                    
+                    # Calculate hindsight metrics
+                    hindsight_metrics = calculate_metrics_for_times(hindsight_filtered, contracts)
+                    hindsight_top_times = get_top_times_by_day(hindsight_metrics, active_weights)
+                    
+                    # Get hindsight trades
+                    hindsight_times = hindsight_top_times[hindsight_top_times['rank'] == fwd_rank][['Day_of_week', 'Entry_Time']]
+                    valid_hindsight_times = set(zip(hindsight_times['Day_of_week'], hindsight_times['Entry_Time']))
+                    
+                    hindsight_trades = hindsight_filtered[
+                        hindsight_filtered.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_hindsight_times, axis=1)
+                    ].copy()
+                    
+                    # Apply day filter for hindsight too if not "All Days"
+                    if fwd_day != "All Days":
+                        hindsight_trades = hindsight_trades[hindsight_trades['Day_of_week'] == fwd_day]
+                    
+                    hindsight_trades = hindsight_trades.sort_values('Date')
+                    hindsight_trades['Cumulative_PL'] = (hindsight_trades['Profit'] * contracts).cumsum()
+                    
+                    # Create forward test chart
+                    fig = go.Figure()
+                    
+                    # Add forward test curve
+                    fig.add_trace(go.Scatter(
+                        x=equity_df['Date'],
+                        y=equity_df['Balance'],
+                        mode='lines',
+                        name='Forward Test (Realistic)',
+                        line=dict(color='blue', width=3)
+                    ))
+                    
+                    # Add starting balance line
+                    fig.add_hline(
+                        y=starting_balance,
+                        line_dash="dash",
+                        line_color="red",
+                        annotation_text="Starting Balance"
+                    )
+                    
+                    fig.update_layout(
+                        title=f"Forward Test Results - Training: {training_weeks}w, Trading: {trading_weeks}w",
+                        xaxis_title="Date",
+                        yaxis_title="Account Value ($)",
+                        yaxis_tickformat='$,.0f',
+                        height=600,
+                        hovermode='x unified'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Performance comparison metrics
+                    col1, col2, col3 = st.columns(3)
+                    
+                    # Forward test metrics
+                    fwd_final_balance = equity_df['Balance'].iloc[-1] if not equity_df.empty else starting_balance
+                    fwd_total_return = fwd_final_balance - starting_balance
+                    fwd_return_pct = (fwd_total_return / starting_balance) * 100
+                    
+                    # Hindsight metrics
+                    hindsight_final = starting_balance + hindsight_trades['Cumulative_PL'].iloc[-1] if not hindsight_trades.empty else starting_balance
+                    hindsight_return = hindsight_final - starting_balance
+                    hindsight_return_pct = (hindsight_return / starting_balance) * 100
+                    
+                    # Degradation
+                    degradation = ((hindsight_return - fwd_total_return) / hindsight_return * 100) if hindsight_return != 0 else 0
+                    
+                    with col1:
+                        st.metric(
+                            "Forward Test Return",
+                            f"${fwd_total_return:,.0f}",
+                            f"{fwd_return_pct:.1f}%"
+                        )
+                    
+                    with col2:
+                        st.metric(
+                            "Hindsight Return",
+                            f"${hindsight_return:,.0f}",
+                            f"{hindsight_return_pct:.1f}%"
+                        )
+                    
+                    with col3:
+                        color = "🟢" if degradation < 30 else "🟡" if degradation < 50 else "🔴"
+                        st.metric(
+                            f"{color} Performance Degradation",
+                            f"{degradation:.1f}%",
+                            "vs Hindsight"
+                        )
+                    
+                    # Show retraining schedule
+                    with st.expander("📅 Retraining Schedule"):
+                        if not retraining_df.empty:
+                            st.dataframe(retraining_df, use_container_width=True, hide_index=True)
+
+                        else:
+                            st.info("No retraining data available")
+                    
+                    # Trade distribution
+                    if not trades_df.empty:
+                        st.subheader("Trade Analysis")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            st.metric("Total Trades", len(trades_df))
+                        
+                        with col2:
+                            win_rate = (trades_df['Profit'] > 0).mean() * 100
+                            st.metric("Win Rate", f"{win_rate:.1f}%")
+                        
+                        with col3:
+                            avg_profit = trades_df['Profit'].mean()
+                            st.metric("Avg Profit", f"${avg_profit:.0f}")
+                        
+                        with col4:
+                            max_dd = calculate_max_drawdown(equity_df['Balance'] - starting_balance)
+                            st.metric("Max Drawdown", f"${max_dd:.0f}")
+                
+                else:
+                    st.warning("Not enough data to run forward test with selected parameters")
+    
+    # ========== TAB 4: ANALYSIS ==========
+    with tab4:
         st.subheader("📊 Trading Analysis")
         
         if not metrics_df.empty:
@@ -998,8 +1468,8 @@ def main():
                 fig.update_layout(height=350)
                 st.plotly_chart(fig, use_container_width=True)
     
-    # ========== TAB 4: ALL TIMES ==========
-    with tab4:
+    # ========== TAB 5: ALL TIMES ==========
+    with tab5:
         st.subheader("📋 All Entry Times Ranked")
         
         if not metrics_df.empty:
@@ -1040,9 +1510,9 @@ def main():
             )
             
             st.caption(f"Showing top 50 of {len(display_all)} total entry times")
-    # ========== TAB 5: Statistical Validation ==========        
-   
-    with tab5:
+    
+    # ========== TAB 6: Statistical Validation ==========        
+    with tab6:
         st.subheader("✅ Statistical Validation")
         
         st.info("""
@@ -1052,7 +1522,7 @@ def main():
         3. **Pattern Stability** - Checks consistency over time
         """)
         
-    if st.button("Run Complete Validation", type="primary"):
+        if st.button("Run Complete Validation", type="primary"):
             # Create a more prominent processing display
             processing_container = st.empty()
             processing_container.warning("🔄 **VALIDATION IN PROGRESS** - Please wait 30-60 seconds...")
@@ -1064,11 +1534,6 @@ def main():
                     # Create columns for progress
                     progress_text = st.empty()
                     progress_bar = st.progress(0)
-                    
-                    # [REST OF YOUR CODE STAYS THE SAME FROM LINE 19 ONWARDS]
-                    
-                    # Then at the very end (before the except blocks), clear the container:
-                    processing_container.empty()
                     
                     # 1. WALK-FORWARD ANALYSIS
                     progress_text.text("Running Walk-Forward Analysis...")
@@ -1155,9 +1620,11 @@ def main():
                     if mc_results['is_significant']:
                         st.success("✅ **Patterns are STATISTICALLY SIGNIFICANT** (p < 0.05)")
                         st.write(f"Your patterns perform better than {mc_results['percentile']:.0f}% of random selections (based on {mc_tester.n_simulations:,} Monte Carlo simulations)")
+                        
                     else:
                         st.error("❌ **Patterns are NOT statistically significant** - Could be random chance")
                         st.write(f"Based on {mc_tester.n_simulations:,} Monte Carlo simulations")
+                   
                     progress_bar.progress(70)
                     
                     # 3. PATTERN STABILITY ANALYSIS
@@ -1186,6 +1653,9 @@ def main():
                     
                     progress_bar.progress(90)
                     
+                    # Clear the processing container
+                    processing_container.empty()
+                    
                     # 4. FINAL ASSESSMENT
                     st.markdown("### 📊 Overall Reliability Assessment")
                     
@@ -1194,7 +1664,7 @@ def main():
                     components = []
                     
                     # Walk-forward component
-                    if wf_results and wf_results['total_windows'] > 0:
+                    if 'wf_results' in locals() and wf_results and wf_results['total_windows'] > 0:
                         wf_score = min(wf_results['success_rate'], 100) * 0.4
                         reliability_score += wf_score
                         components.append(('Walk-Forward Success', wf_score, 40))
@@ -1296,6 +1766,7 @@ def main():
                         """)
                     
                 except ImportError as e:
+                    processing_container.empty()
                     st.error("""
                     ❌ **Validation Module Not Found**
                     
@@ -1306,8 +1777,10 @@ def main():
                     The validation module is essential for determining which patterns are real vs overfitted.
                     """)
                 except Exception as e:
+                    processing_container.empty()
                     st.error(f"An error occurred during validation: {str(e)}")
                     st.write("Please check your data and try again.")
+    
     # Footer
     st.markdown("---")
     st.markdown(
@@ -1324,3 +1797,4 @@ def main():
 # Run the application
 if __name__ == "__main__":
     main()
+                                         
