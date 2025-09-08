@@ -17,7 +17,7 @@ import warnings
 import re
 import requests
 from io import BytesIO
-import config  
+import config  as cfg
 
 warnings.filterwarnings('ignore')
 
@@ -28,7 +28,177 @@ try:
 except ImportError:
     DATA_AVAILABLE = False
     print("Warning: spx_butterfly_optimizer not found. Using sample data.")
+def debug_date_filtering(df, weeks_back, exclude_fomc=True, exclude_earnings=True):
+    """
+    Debug function to show exactly which dates are included/excluded for each day of week
+    """
+    import pandas as pd
+    from datetime import timedelta
+    import config as cfg
+    
+    # Get date range
+    end_date = df['Date'].max()
+    start_date = end_date - timedelta(weeks=weeks_back)
+    
+    # Get all dates in range
+    date_range_df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)].copy()
+    
+    # Convert exclusion dates to datetime
+    fomc_dates = pd.to_datetime(cfg.FOMC_DATES) if exclude_fomc else pd.DatetimeIndex([])
+    earnings_dates = pd.to_datetime(cfg.EARNINGS_DATES) if exclude_earnings else pd.DatetimeIndex([])
+    
+    # Days of week
+    days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    
+    debug_info = {}
+    
+    for day in days_order:
+        # Get all dates for this day of week
+        day_dates = date_range_df[date_range_df['Day_of_week'] == day]['Date'].unique()
+        day_dates = pd.Series(day_dates).sort_values()
+        
+        excluded_dates = {
+            'fomc': [],
+            'earnings': [],
+            'late_time': [],
+            'total_available': len(day_dates),
+            'all_dates': []
+        }
+        
+        # Track each date
+        for date in day_dates:
+            date_info = {'date': date.strftime('%Y-%m-%d'), 'excluded_by': []}
+            
+            # Check exclusions
+            if exclude_fomc and date in fomc_dates:
+                excluded_dates['fomc'].append(date.strftime('%Y-%m-%d'))
+                date_info['excluded_by'].append('FOMC')
+            
+            if exclude_earnings and date in earnings_dates:
+                excluded_dates['earnings'].append(date.strftime('%Y-%m-%d'))
+                date_info['excluded_by'].append('Earnings')
+            
+            # Check for late times (after 15:30)
+            day_data = date_range_df[date_range_df['Date'] == date]
+            if not day_data.empty:
+                # Check if any entries are after 15:30
+                late_times = day_data[day_data['Entry_Time'] > pd.to_datetime('15:30', format='%H:%M').time()]
+                if len(late_times) == len(day_data):  # All entries are late
+                    excluded_dates['late_time'].append(date.strftime('%Y-%m-%d'))
+                    date_info['excluded_by'].append('Late Time')
+            
+            excluded_dates['all_dates'].append(date_info)
+        
+        # Calculate final count
+        final_dates = day_dates.copy()
+        if exclude_fomc:
+            final_dates = final_dates[~final_dates.isin(fomc_dates)]
+        if exclude_earnings:
+            final_dates = final_dates[~final_dates.isin(earnings_dates)]
+        
+        # Also need to filter by time
+        final_df = date_range_df[
+            (date_range_df['Day_of_week'] == day) & 
+            (date_range_df['Date'].isin(final_dates)) &
+            (date_range_df['Entry_Time'] <= pd.to_datetime('15:30', format='%H:%M').time())
+        ]
+        
+        excluded_dates['final_count'] = len(final_df['Date'].unique())
+        excluded_dates['dates_included'] = sorted([d.strftime('%Y-%m-%d') for d in final_df['Date'].unique()])
+        
+        debug_info[day] = excluded_dates
+    
+    return debug_info
 
+# Add this to your main dashboard in a debug expander
+def add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings):
+    """
+    Add this to your main() function after loading data
+    """
+    with st.expander("🔍 Debug: Date Filtering Details", expanded=False):
+        st.write("### Date Range Analysis")
+        
+        debug_data = debug_date_filtering(df, weeks_history, exclude_fomc, exclude_earnings)
+        
+        # Summary table
+        summary_data = []
+        for day, info in debug_data.items():
+            summary_data.append({
+                'Day': day,
+                'Total in Range': info['total_available'],
+                'FOMC Excluded': len(info['fomc']),
+                'Earnings Excluded': len(info['earnings']),
+                'Late Time Excluded': len(info['late_time']),
+                'Final Count': info['final_count']
+            })
+        
+        summary_df = pd.DataFrame(summary_data)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        
+        # Detailed view for each day
+        selected_day = st.selectbox("View details for:", list(debug_data.keys()))
+        
+        if selected_day:
+            day_info = debug_data[selected_day]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Excluded Dates:**")
+                if day_info['fomc']:
+                    st.write(f"FOMC: {', '.join(day_info['fomc'])}")
+                if day_info['earnings']:
+                    st.write(f"Earnings: {', '.join(day_info['earnings'])}")
+                if day_info['late_time']:
+                    st.write(f"Late Time: {', '.join(day_info['late_time'])}")
+            
+            with col2:
+                st.write("**Included Dates:**")
+                # Show first and last 5 dates
+                included = day_info['dates_included']
+                if len(included) > 10:
+                    st.write(f"First 5: {', '.join(included[:5])}")
+                    st.write(f"Last 5: {', '.join(included[-5:])}")
+                    st.write(f"Total: {len(included)} dates")
+                else:
+                    st.write(', '.join(included))
+        
+        # Check for potential issues
+        st.write("### Potential Issues Detected:")
+        issues = []
+        
+        for day, info in debug_data.items():
+            expected_weeks = weeks_history
+            expected_dates = expected_weeks  # Roughly 1 date per week for each day
+            
+            if info['final_count'] < expected_dates * 0.8:  # Less than 80% of expected
+                issues.append(f"**{day}**: Only {info['final_count']} dates found (expected ~{expected_dates})")
+        
+        if issues:
+            for issue in issues:
+                st.warning(issue)
+        else:
+            st.success("No obvious issues detected")
+        
+        # Date range info
+        st.write("### Date Range Info")
+        end_date = df['Date'].max()
+        start_date = end_date - timedelta(weeks=weeks_history)
+        st.write(f"- Start: {start_date.strftime('%Y-%m-%d')}")
+        st.write(f"- End: {end_date.strftime('%Y-%m-%d')}")
+        st.write(f"- Weeks: {weeks_history}")
+        
+        # Check for holidays in the period
+        from pandas.tseries.holiday import USFederalHolidayCalendar
+        cal = USFederalHolidayCalendar()
+        holidays = cal.holidays(start=start_date, end=end_date)
+        
+        if len(holidays) > 0:
+            st.write(f"### US Market Holidays in Period ({len(holidays)} total):")
+            for holiday in holidays:
+                day_of_week = holiday.strftime('%A')
+                if day_of_week in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
+                    st.write(f"- {holiday.strftime('%Y-%m-%d')} ({day_of_week})")
 # ============================================================================
 # METRIC CALCULATIONS
 # ============================================================================
@@ -94,15 +264,15 @@ def calculate_max_drawdown(cumulative_returns):
     return abs(drawdown.min())
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0):
-    """Calculate Sharpe ratio"""
+    """Per-trade Sharpe-like statistic (not annualized)."""
     if len(returns) < 2:
-        return 0
-    
-    excess_returns = returns - risk_free_rate
-    if excess_returns.std() == 0:
-        return 0
-    
-    return np.sqrt(252) * (excess_returns.mean() / excess_returns.std())  # Annualized
+        return 0.0
+    excess = returns - risk_free_rate
+    sd = excess.std()
+    if sd == 0:
+        return 0.0
+    return excess.mean() / sd
+
 
 def get_score_color_style(score):
     """Return color style based on score value"""
@@ -139,7 +309,7 @@ def load_historical_data(symbol, strategy):
 
     # Try cloud (Google Drive)
     try:
-        data_bytes = _download_drive_bytes(config.GOOGLE_DRIVE_FILE_ID)
+        data_bytes = _download_drive_bytes(cfg.GOOGLE_DRIVE_FILE_ID)
         df = pd.read_parquet(BytesIO(data_bytes))
         source = "cloud"
     except Exception as e:
@@ -152,9 +322,12 @@ def load_historical_data(symbol, strategy):
             return pd.DataFrame()
 
     # Filter & format
+    # Filter & format (robust parsing)
     df = df[(df['Symbol'] == symbol) & (df['Name'] == strategy)].copy()
-    df['Date'] = pd.to_datetime(df['Date'])
-    df['Entry_Time'] = pd.to_datetime(df['Entry_Time'], format='%H:%M').dt.time
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df['Entry_Time'] = pd.to_datetime(df['Entry_Time'].astype(str), errors='coerce').dt.time
+    df = df.dropna(subset=['Date', 'Entry_Time'])
+
 
     # Sidebar status
     try:
@@ -175,11 +348,11 @@ def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=Tru
     filtered = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)].copy()
     
     if exclude_fomc:
-        fomc_dates = pd.to_datetime(config.FOMC_DATES)
+        fomc_dates = pd.to_datetime(cfg.FOMC_DATES)
         filtered = filtered[~filtered['Date'].isin(fomc_dates)]
     
     if exclude_earnings:
-        earnings_dates = pd.to_datetime(config.EARNINGS_DATES)
+        earnings_dates = pd.to_datetime(cfg.EARNINGS_DATES)
         filtered = filtered[~filtered['Date'].isin(earnings_dates)]
     
     # Filter out late times
@@ -293,117 +466,95 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
 def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter, 
                      active_weights, contracts, starting_balance,
                      exclude_fomc=True, exclude_earnings=True):
-    """Run walk-forward testing simulation"""
-    
-    # Sort data by date
+    """Run walk-forward testing simulation with consistent filters in BOTH
+    training and trading windows."""
     df = df.sort_values('Date').copy()
-    
-    # Get date range
+
+    # Precompute exclusion calendars once
+    fomc_dates = pd.to_datetime(cfg.FOMC_DATES) if exclude_fomc else pd.DatetimeIndex([])
+    earnings_dates = pd.to_datetime(cfg.EARNINGS_DATES) if exclude_earnings else pd.DatetimeIndex([])
+
     min_date = df['Date'].min()
     max_date = df['Date'].max()
-    
-    # Initialize results
-    equity_curve = []
-    trades_log = []
-    retraining_log = []
+
+    equity_curve, trades_log, retraining_log = [], [], []
     current_balance = starting_balance
-    
-    # Calculate total weeks available
-    total_weeks = (max_date - min_date).days // 7
-    
-    # Start walk-forward process
+
     current_start = min_date
-    
     while current_start < max_date:
-        # Define training period
         training_end = current_start + timedelta(weeks=training_weeks)
-        
-        # Define trading period
         trading_start = training_end
-        trading_end = trading_start + timedelta(weeks=trading_weeks)
-        
-        # Ensure we don't go beyond available data
-        if trading_end > max_date:
-            trading_end = max_date
-        
-        # Skip if not enough data
+        trading_end = min(trading_start + timedelta(weeks=trading_weeks), max_date)
+
         if trading_start >= max_date:
             break
-        
-        # Get training data
-        training_data = df[(df['Date'] >= current_start) & (df['Date'] < training_end)].copy()
-        
-        # Apply filters
-        if exclude_fomc:
-            fomc_dates = pd.to_datetime(config.FOMC_DATES)
-            training_data = training_data[~training_data['Date'].isin(fomc_dates)]
 
+        # --- TRAINING DATA (apply exclusions) ---
+        training_data = df[(df['Date'] >= current_start) & (df['Date'] < training_end)].copy()
+        if exclude_fomc:
+            training_data = training_data[~training_data['Date'].isin(fomc_dates)]
         if exclude_earnings:
-            earnings_dates = pd.to_datetime(config.EARNINGS_DATES)
             training_data = training_data[~training_data['Date'].isin(earnings_dates)]
-            
-                
-        # Calculate metrics on training data
-        if len(training_data) > 0:
-            metrics_df = calculate_metrics_for_times(training_data, contracts)
-            
-            if not metrics_df.empty:
-                # Get top times based on training data
-                top_times_df = get_top_times_by_day(metrics_df, active_weights)
-                
-                if not top_times_df.empty:
-                    # Get selected rank times
-                    selected_times = top_times_df[top_times_df['rank'] == rank][['Day_of_week', 'Entry_Time']]
-                    
-                    # Log retraining
-                    retraining_log.append({
-                        'Training Start': current_start,
-                        'Training End': training_end,
-                        'Trading Start': trading_start,
-                        'Trading End': trading_end,
-                        'Selected Times': len(selected_times)
-                    })
-                    
-                    # Get trading data
-                    trading_data = df[(df['Date'] >= trading_start) & (df['Date'] < trading_end)].copy()
-                    
-                    # Apply day filter if specified
-                    if day_filter != "All Days":
-                        trading_data = trading_data[trading_data['Day_of_week'] == day_filter]
-                    
-                    # Filter for selected times
-                    valid_times = set(zip(selected_times['Day_of_week'], selected_times['Entry_Time']))
-                    trading_data = trading_data[
-                        trading_data.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_times, axis=1)
-                    ]
-                    
-                    # Execute trades and update balance
-                    for _, trade in trading_data.iterrows():
-                        profit = trade['Profit'] * contracts
-                        current_balance += profit
-                        
-                        equity_curve.append({
-                            'Date': trade['Date'],
-                            'Balance': current_balance,
-                            'Profit': profit
-                        })
-                        
-                        trades_log.append({
-                            'Date': trade['Date'],
-                            'Day': trade['Day_of_week'],
-                            'Time': trade['Entry_Time'],
-                            'Profit': profit
-                        })
-        
-        # Move to next period
+
+        if len(training_data) == 0:
+            current_start = current_start + timedelta(weeks=trading_weeks)
+            continue
+
+        metrics_df = calculate_metrics_for_times(training_data, contracts)
+        if metrics_df.empty:
+            current_start = current_start + timedelta(weeks=trading_weeks)
+            continue
+
+        top_times_df = get_top_times_by_day(metrics_df, active_weights)
+        if top_times_df.empty:
+            current_start = current_start + timedelta(weeks=trading_weeks)
+            continue
+
+        selected_times = top_times_df[top_times_df['rank'] == rank][['Day_of_week', 'Entry_Time']].copy()
+        retraining_log.append({
+            'Training Start': current_start,
+            'Training End': training_end,
+            'Trading Start': trading_start,
+            'Trading End': trading_end,
+            'Selected Times': len(selected_times)
+        })
+
+        # --- TRADING DATA (apply SAME exclusions) ---
+        trading_data = df[(df['Date'] >= trading_start) & (df['Date'] < trading_end)].copy()
+        if exclude_fomc:
+            trading_data = trading_data[~trading_data['Date'].isin(fomc_dates)]
+        if exclude_earnings:
+            trading_data = trading_data[~trading_data['Date'].isin(earnings_dates)]
+        if day_filter != "All Days":
+            trading_data = trading_data[trading_data['Day_of_week'] == day_filter]
+
+        if trading_data.empty or selected_times.empty:
+            current_start = current_start + timedelta(weeks=trading_weeks)
+            continue
+
+        # Vectorized selection instead of row-wise lambda
+        key_trd = trading_data.assign(_key=trading_data['Day_of_week'].astype(str) + '|' + trading_data['Entry_Time'].astype(str))
+        key_sel = selected_times.assign(_key=selected_times['Day_of_week'].astype(str) + '|' + selected_times['Entry_Time'].astype(str))['_key']
+        trading_data = trading_data[key_trd['_key'].isin(set(key_sel))]
+
+        if trading_data.empty:
+            current_start = current_start + timedelta(weeks=trading_weeks)
+            continue
+
+        # Execute trades
+        for _, trade in trading_data.sort_values('Date').iterrows():
+            profit = trade['Profit'] * contracts
+            current_balance += profit
+            equity_curve.append({'Date': trade['Date'], 'Balance': current_balance, 'Profit': profit})
+            trades_log.append({'Date': trade['Date'], 'Day': trade['Day_of_week'], 'Time': trade['Entry_Time'], 'Profit': profit})
+
         current_start = current_start + timedelta(weeks=trading_weeks)
-    
-    # Convert to DataFrames
+
     equity_df = pd.DataFrame(equity_curve) if equity_curve else pd.DataFrame()
     trades_df = pd.DataFrame(trades_log) if trades_log else pd.DataFrame()
     retraining_df = pd.DataFrame(retraining_log) if retraining_log else pd.DataFrame()
-    
     return equity_df, trades_df, retraining_df
+
 
 # ============================================================================
 # MAIN APPLICATION
@@ -721,7 +872,8 @@ def main():
         
         # Calculate metrics
         metrics_df = calculate_metrics_for_times(filtered_df, contracts)
-        
+        # Add debug section for troubleshooting
+        add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings)
         # Get active weights
         active_weights = {
             k: v['weight'] for k, v in st.session_state.metric_weights.items() 
@@ -774,9 +926,10 @@ def main():
         
         if not top_times_df.empty:
             # Get current week dates
-            import pytz
-            et_tz = pytz.timezone('US/Eastern')
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
             today_et = datetime.now(et_tz)
+
 
             # If it's Friday after 4pm ET or any time on weekend, show next week
             if (today_et.weekday() == 4 and today_et.hour >= 16) or today_et.weekday() in [5, 6]:
@@ -851,18 +1004,17 @@ def main():
                 
                 # Define the styling function
                 def style_scores(df_to_style):
-                    """Apply color styling to score column"""
                     def color_score(val):
                         if isinstance(val, (int, float)):
                             if val >= 0.70:
-                                return 'background-color: #90EE90; color: black; font-weight: bold'
+                                return 'background-color: #90EE90; color: black; font-weight: bold'   # green
                             elif val >= 0.50:
-                                return 'background-color: #FFD700; color: black; font-weight: bold'
+                                return 'background-color: #FFD700; color: black; font-weight: bold'   # gold
                             else:
-                                return 'background-color: #87CEEB; color: black; font-weight: bold'
+                                return 'background-color: #FF6B6B; color: black; font-weight: bold'   # red
                         return ''
-                    
                     return df_to_style.style.map(color_score, subset=['Score'])
+
                 
                 # Display with styling
                 styled_df = style_scores(display_df)
@@ -977,9 +1129,21 @@ def main():
             valid_times = set(zip(rank_times['Day_of_week'], rank_times['Entry_Time']))
             
             # Filter the original data to only include trades at the selected rank times
-            rank_filtered_df = perf_filtered_df[
-                perf_filtered_df.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_times, axis=1)
-            ].copy()
+            # Build the set of rank-selected times
+            rank_times = perf_top_times_df[
+                perf_top_times_df['rank'] == selected_rank
+            ][['Day_of_week', 'Entry_Time']]
+
+            if selected_day != "All Days":
+                rank_times = rank_times[rank_times['Day_of_week'] == selected_day]
+
+            # Vectorized filter (replaces the apply/lambda block)
+            rank_filtered_df = perf_filtered_df.merge(
+                rank_times,
+                on=['Day_of_week', 'Entry_Time'],
+                how='inner'
+            ).copy()
+
             
             # Apply day filter if not "All Days"
             if selected_day != "All Days":
@@ -1135,18 +1299,34 @@ def main():
         with st.expander("📘 **Understanding Forward Testing Results**", expanded=False):
             st.info("""
             **What Is Forward Testing?**
-            
-            This tab shows how the strategy would have performed in REAL TRADING conditions, where you can only use past data to make decisions about the future. This is fundamentally different from the Performance tab.
+                    
+            This tab shows how the strategy would have performed in REAL TRADING conditions, 
+            where only past data can be used to make decisions about the future.        
+                    
+            Easy explanation:  Use 20 weeks as Training Window to determine best times, 2 weeks to trade those times, repeat after 2 weeks. 
+            This explanation assumes you set Training Window to 20 and Trading Window to 2.  Any metric filters you select are applied when 
+            determining the best times to trade.
+                    
+            **How The Process Works:**
+                    
+             The graph begins at the end of the first x weeks Training Window (20 wks for example), since that is the earliest point where out-of-
+             sample results exist. What the graph shows is the profit from each x-week Trading Window (2 wks for example), where a new 
+             set of best times is selected after every Training Window and then applied to the following 2 weeks in this example. 
+             This process repeats until the data runs out.
+                    
+            **Key Difference from Date Range (Weeks of History) slider in left panel:** 
+                    
+              The Date Range slider in the left panel simply limits how many past weeks are included in the analysis for the Best Times tab.
+              The Target icon (Optimal Period) runs an optimization across multiple window lengths to find the period that 
+              would have historically produced the best results, and uses that as the basis for selecting best trade times.  
+              The Forward Testing tab, on the other hand, lets you experiment with different Training and Trading window sizes 
+              to see how the strategy would have performed if applied step-by-step through time.                       
             
             **Key Difference from Performance Tab:**
+                    
             - **Performance Tab**: Shows results using "perfect hindsight" - the best times are identified using ALL the data, then performance is calculated on that same data. This creates unrealistic expectations.
             - **Forward Testing Tab**: Shows realistic results - best times are identified using ONLY past data, then traded forward into unknown future data. This mimics actual trading conditions.
-            
-            **How The Process Works:**
-            1. **Training Period**: Uses X weeks of historical data to identify the best trading times
-            2. **Trading Period**: Trades those times for Y weeks into the future (without knowing if they'll work)
-            3. **Retrain**: After the trading period, retrain using the next window of data
-            4. **Repeat**: Continue rolling forward through all available data
+                    
             
             **How to Use These Settings:**
             
@@ -1158,35 +1338,21 @@ def main():
             **Trading Window (1-8 weeks)**
             - Shorter (1-2 weeks): Frequent retraining, adapts quickly but higher transaction costs
             - Medium (3-4 weeks): Good balance between adaptation and stability
-            - Longer (6-8 weeks): Less frequent changes, but risk using stale patterns
-            
-            **What to Look For:**
-            ✅ **Good Signs:**
-            - Forward test equity curve stays close to hindsight curve
-            - Consistent upward trend even with retraining
-            - Performance degradation < 30%
-            
-            ⚠️ **Warning Signs:**
-            - Large gap between forward test and hindsight curves
-            - Equity curve flattens or declines after retraining
-            - Performance degradation > 50%
-            - Wildly different "best times" after each retraining
-            
-            **Reality Check:**
-            If forward testing shows significantly worse results than the Performance tab, the patterns are likely overfitted to historical noise rather than capturing genuine market behavior. Only trade strategies that show robust forward-testing results.
-            
-            💡 **Pro Tip**: Try multiple Training/Trading window combinations. If results vary wildly, the patterns are unstable and should not be traded with real money.
+            - Longer (6-8 weeks): Less frequent changes, but risk using stale patterns 
+
             """)
         
-        # Forward testing controls
-        col1, col2, col3, col4, col5, col6, col7 = st.columns([1.5, 1.5, 1.5, 1.5, 2, 1, 1])
+        # --- Forward Testing controls ---
+    # --- Forward Testing controls ---
+        # First row of controls
+        col1, col2, col3, col4 = st.columns([1.5, 1.5, 2, 2])
         
         with col1:
             training_weeks = st.slider(
                 "Training Window",
                 min_value=4,
                 max_value=26,
-                value=12,
+                value=8,
                 key="fwd_training_weeks",
                 help="Weeks of historical data to identify patterns"
             )
@@ -1196,7 +1362,7 @@ def main():
                 "Trading Window",
                 min_value=1,
                 max_value=8,
-                value=4,
+                value=2,
                 key="fwd_trading_weeks",
                 help="Weeks to trade before retraining"
             )
@@ -1217,39 +1383,46 @@ def main():
                 key="fwd_day_selector"
             )
         
-        with col5:
-            fwd_weeks_range = st.slider(
-                "Date Range (weeks)",
-                min_value=training_weeks + trading_weeks,
-                max_value=52,
-                value=min(30, max(20, training_weeks + trading_weeks * 2)),
-                key="fwd_weeks_range",
-                help="Total weeks of data to use for forward testing"
+        # Second row for checkboxes
+        col1, col2, col3 = st.columns([3, 1.5, 1.5])
+        
+        with col1:
+            only_after_aug_upgrade = st.checkbox(
+                "Only After Aug 2024 1.37 M8B upgrade",
+                value=False,
+                key="fwd_only_after_aug_2024",
+                help="When checked, use only trades with Date ≥ 2024-08-01"
             )
         
-        with col6:
+        with col2:
             fwd_exclude_fomc = st.checkbox(
                 "Exclude FOMC",
                 value=exclude_fomc,
                 key="fwd_exclude_fomc"
             )
         
-        with col7:
+        with col3:
             fwd_exclude_earnings = st.checkbox(
                 "Exclude Earnings",
                 value=exclude_earnings,
                 key="fwd_exclude_earnings"
             )
         
-        # Run forward test button
-        if st.button("Run Forward Test", type="primary", key="run_forward_test"):
+        # Auto-run forward test when settings change
+        # Check if we need to run based on changes to key parameters
+        run_test = True  # Always run automatically
+        
+        if run_test:
             with st.spinner("Running forward test simulation..."):
-                # Get data for forward testing
-                fwd_test_df = filter_data_by_weeks(df, fwd_weeks_range, False, False)  # Don't filter here, do it in the function
-                
-                # Run forward test
+                # Build dataset scope based on checkbox
+                df_for_fwd = df.copy()
+                if only_after_aug_upgrade:
+                    cutoff = pd.Timestamp("2024-08-01")
+                    df_for_fwd = df_for_fwd[df_for_fwd["Date"] >= cutoff]
+
+                # Run forward test (exclusions applied inside the function)
                 equity_df, trades_df, retraining_df = run_forward_test(
-                    fwd_test_df,
+                    df_for_fwd,
                     training_weeks,
                     trading_weeks,
                     fwd_rank,
@@ -1260,192 +1433,235 @@ def main():
                     fwd_exclude_fomc,
                     fwd_exclude_earnings
                 )
-                
+
                 if not equity_df.empty:
-                    # Create comparison with hindsight results
-                    hindsight_filtered = filter_data_by_weeks(
-                        df, 
-                        fwd_weeks_range, 
-                        fwd_exclude_fomc, 
-                        fwd_exclude_earnings
-                    )
-                    
-                    # Calculate hindsight metrics
+                    # Hindsight comparison on the same scoped data
+                    hindsight_filtered = df_for_fwd.copy()
+                    if fwd_exclude_fomc:
+                        hindsight_filtered = hindsight_filtered[
+                            ~hindsight_filtered["Date"].isin(pd.to_datetime(cfg.FOMC_DATES))
+                        ]
+                    if fwd_exclude_earnings:
+                        hindsight_filtered = hindsight_filtered[
+                            ~hindsight_filtered["Date"].isin(pd.to_datetime(cfg.EARNINGS_DATES))
+                        ]
+
                     hindsight_metrics = calculate_metrics_for_times(hindsight_filtered, contracts)
                     hindsight_top_times = get_top_times_by_day(hindsight_metrics, active_weights)
-                    
-                    # Get hindsight trades
-                    hindsight_times = hindsight_top_times[hindsight_top_times['rank'] == fwd_rank][['Day_of_week', 'Entry_Time']]
-                    valid_hindsight_times = set(zip(hindsight_times['Day_of_week'], hindsight_times['Entry_Time']))
-                    
-                    hindsight_trades = hindsight_filtered[
-                        hindsight_filtered.apply(lambda row: (row['Day_of_week'], row['Entry_Time']) in valid_hindsight_times, axis=1)
-                    ].copy()
-                    
-                    # Apply day filter for hindsight too if not "All Days"
-                    if fwd_day != "All Days":
-                        hindsight_trades = hindsight_trades[hindsight_trades['Day_of_week'] == fwd_day]
-                    
-                    hindsight_trades = hindsight_trades.sort_values('Date')
-                    hindsight_trades['Cumulative_PL'] = (hindsight_trades['Profit'] * contracts).cumsum()
-                    
-                    # Create forward test chart
-                    fig = go.Figure()
-                    
-                    # Add forward test curve
-                    fig.add_trace(go.Scatter(
-                        x=equity_df['Date'],
-                        y=equity_df['Balance'],
-                        mode='lines',
-                        name='Forward Test (Realistic)',
-                        line=dict(color='blue', width=3)
-                    ))
-                    
-                    # Add starting balance line
-                    fig.add_hline(
-                        y=starting_balance,
-                        line_dash="dash",
-                        line_color="red",
-                        annotation_text="Starting Balance"
+                    hindsight_times = hindsight_top_times[
+                        hindsight_top_times["rank"] == fwd_rank
+                    ][["Day_of_week", "Entry_Time"]]
+
+                    hindsight_trades = hindsight_filtered.merge(
+                        hindsight_times, on=["Day_of_week", "Entry_Time"], how="inner"
                     )
-                    
+                    if fwd_day != "All Days":
+                        hindsight_trades = hindsight_trades[hindsight_trades["Day_of_week"] == fwd_day]
+                    hindsight_trades = hindsight_trades.sort_values("Date")
+                    hindsight_trades["Cumulative_PL"] = (hindsight_trades["Profit"] * contracts).cumsum()
+
+                    # Plot
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=equity_df["Date"],
+                        y=equity_df["Balance"],
+                        mode="lines",
+                        name="Forward Test (Realistic)",
+                        line=dict(color="blue", width=3)
+                    ))
+                    fig.add_hline(y=starting_balance, line_dash="dash", line_color="red", annotation_text="Starting Balance")
                     fig.update_layout(
                         title=f"Forward Test Results - Training: {training_weeks}w, Trading: {trading_weeks}w",
                         xaxis_title="Date",
                         yaxis_title="Account Value ($)",
-                        yaxis_tickformat='$,.0f',
+                        yaxis_tickformat="$,.0f",
                         height=600,
-                        hovermode='x unified'
+                        hovermode="x unified"
                     )
-                    
                     st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Performance comparison metrics
-                    col1, col2, col3 = st.columns(3)
-                    
-                    # Forward test metrics
-                    fwd_final_balance = equity_df['Balance'].iloc[-1] if not equity_df.empty else starting_balance
-                    fwd_total_return = fwd_final_balance - starting_balance
-                    fwd_return_pct = (fwd_total_return / starting_balance) * 100
-                    
-                    # Hindsight metrics
-                    hindsight_final = starting_balance + hindsight_trades['Cumulative_PL'].iloc[-1] if not hindsight_trades.empty else starting_balance
-                    hindsight_return = hindsight_final - starting_balance
-                    hindsight_return_pct = (hindsight_return / starting_balance) * 100
-                    
-                    # Degradation
-                    degradation = ((hindsight_return - fwd_total_return) / hindsight_return * 100) if hindsight_return != 0 else 0
-                    
-                    with col1:
-                        st.metric(
-                            "Forward Test Return",
-                            f"${fwd_total_return:,.0f}",
-                            f"{fwd_return_pct:.1f}%"
-                        )
-                    
-                    with col2:
-                        st.metric(
-                            "Hindsight Return",
-                            f"${hindsight_return:,.0f}",
-                            f"{hindsight_return_pct:.1f}%"
-                        )
-                    
-                    with col3:
-                        color = "🟢" if degradation < 30 else "🟡" if degradation < 50 else "🔴"
-                        st.metric(
-                            f"{color} Performance Degradation",
-                            f"{degradation:.1f}%",
-                            "vs Hindsight"
-                        )
-                    
-                    # Show retraining schedule
-                    with st.expander("📅 Retraining Schedule"):
-                        if not retraining_df.empty:
-                            st.dataframe(retraining_df, use_container_width=True, hide_index=True)
 
-                        else:
-                            st.info("No retraining data available")
-                    
-                    # Trade distribution
+                    # Metrics
                     if not trades_df.empty:
                         st.subheader("Trade Analysis")
                         
-                        col1, col2, col3, col4 = st.columns(4)
+                        # Calculate metrics
+                        # Calculate metrics
+                        fwd_final_balance = equity_df["Balance"].iloc[-1]
+                        fwd_total_return = fwd_final_balance - starting_balance
+                        fwd_return_pct = (fwd_total_return / starting_balance) * 100
+                        avg_profit = trades_df["Profit"].mean()
+                        win_rate = (trades_df["Profit"] > 0).mean() * 100
+                        profit_factor = calculate_profit_factor(trades_df["Profit"])
+                        max_dd = calculate_max_drawdown(equity_df["Balance"] - starting_balance)
+
+                        c1, c2, c3, c4, c5, c6 = st.columns(6)
+                        c1.metric("Avg Profit", f"${avg_profit:.0f}")
+                        c2.metric("Win Rate", f"{win_rate:.1f}%")
+                        c3.metric("Profit Factor", f"{profit_factor:.2f}")
+                        c4.metric("Forward Test Return", f"${fwd_total_return:,.0f}", f"{fwd_return_pct:.1f}%")
+                        c5.metric("Max Drawdown", f"${max_dd:,.0f}")
+                        c6.metric("Total Trades", len(trades_df))    
+                    
+                    # Show current times to trade based on latest training window
+                    st.markdown("### 📍 Current Trading Times")
+                    st.info("Based on your selected parameters, here are the times you should trade this week:")
+                    
+                    # Get the most recent training data
+                    most_recent_date = df_for_fwd['Date'].max()
+                    training_start = most_recent_date - timedelta(weeks=training_weeks)
+                    
+                    # Get training data for most recent window
+                    recent_training = df_for_fwd[
+                        (df_for_fwd['Date'] > training_start) & 
+                        (df_for_fwd['Date'] <= most_recent_date)
+                    ].copy()
+                    
+                    # Apply exclusions
+                    if fwd_exclude_fomc:
+                        recent_training = recent_training[~recent_training['Date'].isin(pd.to_datetime(cfg.FOMC_DATES))]
+                    if fwd_exclude_earnings:
+                        recent_training = recent_training[~recent_training['Date'].isin(pd.to_datetime(cfg.EARNINGS_DATES))]
+                    
+                    # Calculate metrics and get top times
+                    recent_metrics = calculate_metrics_for_times(recent_training, contracts)
+                    recent_top_times = get_top_times_by_day(recent_metrics, active_weights)
+                    
+                    # Filter for selected rank
+                    current_times = recent_top_times[recent_top_times['rank'] == fwd_rank].copy()
+                    
+                    # Apply day filter if needed
+                    if fwd_day != "All Days":
+                        current_times = current_times[current_times['Day_of_week'] == fwd_day]
+                    
+                    if not current_times.empty:
+                        # Display times by day
+                        days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
                         
-                        with col1:
-                            st.metric("Total Trades", len(trades_df))
+                        cols = st.columns(5)
+                        for i, day in enumerate(days_order):
+                            day_time = current_times[current_times['Day_of_week'] == day]
+                            with cols[i]:
+                                st.markdown(f"### {day}") 
+                                if not day_time.empty:
+                                    time_str = day_time.iloc[0]['Entry_Time'].strftime('%H:%M')
+                                    score = day_time.iloc[0]['composite_score']
+                                    st.markdown(f"### 🕐 {time_str}") 
+                                    st.markdown(f"**Score: {score:.3f}**")
+                                else:
+                                    st.markdown("—")
                         
-                        with col2:
-                            win_rate = (trades_df['Profit'] > 0).mean() * 100
-                            st.metric("Win Rate", f"{win_rate:.1f}%")
+                        st.caption(f"*Based on last {training_weeks} weeks of data through {most_recent_date.strftime('%m/%d/%Y')}*")
+ 
+                        # Save/Load Settings Section
+                        st.markdown("### 💾 Save/Load Configuration")
+                        col_save, col_load = st.columns(2)
                         
-                        with col3:
-                            avg_profit = trades_df['Profit'].mean()
-                            st.metric("Avg Profit", f"${avg_profit:.0f}")
+                        with col_save:
+                            # Prepare settings dictionary
+                            settings_to_save = {
+                                'training_weeks': training_weeks,
+                                'trading_weeks': trading_weeks,
+                                'rank': fwd_rank,
+                                'day_filter': fwd_day,
+                                'exclude_fomc': fwd_exclude_fomc,
+                                'exclude_earnings': fwd_exclude_earnings,
+                                'metric_weights': active_weights,
+                                'contracts': contracts,
+                                'starting_balance': starting_balance,
+                                'symbol': symbol,
+                                'strategy': strategy,
+                                'current_times': current_times[['Day_of_week', 'Entry_Time', 'composite_score']].to_dict('records'),
+                                'last_data_date': most_recent_date.strftime('%Y-%m-%d')
+                            }
+                            
+                            # Convert Entry_Time to string for JSON serialization
+                            for time_entry in settings_to_save['current_times']:
+                                time_entry['Entry_Time'] = time_entry['Entry_Time'].strftime('%H:%M')
+                            
+                            import json
+                            st.download_button(
+                                label="📥 Download Settings",
+                                data=json.dumps(settings_to_save, indent=2),
+                                file_name=f"fwd_settings_{symbol}_{strategy}_{datetime.now():%Y%m%d_%H%M}.json",
+                                mime="application/json",
+                                help="Save your current configuration and trading times"
+                            )
                         
-                        with col4:
-                            max_dd = calculate_max_drawdown(equity_df['Balance'] - starting_balance)
-                            st.metric("Max Drawdown", f"${max_dd:.0f}")
-                
-                else:
-                    st.warning("Not enough data to run forward test with selected parameters")
-    
+                        with col_load:
+                            uploaded_file = st.file_uploader("📤 Load Settings", type=['json'], key="fwd_settings_upload")
+                            if uploaded_file is not None:
+                                try:
+                                    import json
+                                    loaded_settings = json.load(uploaded_file)
+                                    
+                                    # Display what was loaded
+                                    st.success("Settings loaded successfully!")
+                                    st.caption(f"Config from: {loaded_settings.get('last_data_date', 'Unknown date')}")
+                                    st.caption(f"Symbol: {loaded_settings.get('symbol', 'N/A')} | Strategy: {loaded_settings.get('strategy', 'N/A')}")
+                                    
+                                    # Show loaded parameters
+                                    with st.expander("View Loaded Settings"):
+                                        st.write(f"**Training Window:** {loaded_settings.get('training_weeks')} weeks")
+                                        st.write(f"**Trading Window:** {loaded_settings.get('trading_weeks')} weeks")
+                                        st.write(f"**Rank:** {loaded_settings.get('rank')}")
+                                        st.write(f"**Day Filter:** {loaded_settings.get('day_filter')}")
+                                        st.write(f"**Exclude FOMC:** {loaded_settings.get('exclude_fomc')}")
+                                        st.write(f"**Exclude Earnings:** {loaded_settings.get('exclude_earnings')}")
+                                        st.write("**Trading Times:**")
+                                        for t in loaded_settings.get('current_times', []):
+                                            st.write(f"  • {t['Day_of_week']}: {t['Entry_Time']} (Score: {t['composite_score']:.3f})")
+                                    
+                                    st.info("ℹ️ To apply these settings, manually adjust the controls above to match the loaded values")
+                                    
+                                except Exception as e:
+                                    st.error(f"Error loading settings: {str(e)}")
+                    else:
+                        st.warning("No trading times found for current parameters")    
+        
     # ========== TAB 4: ANALYSIS ==========
     with tab4:
         st.subheader("📊 Trading Analysis")
-        
+
         if not metrics_df.empty:
-            # Time distribution heatmap
             st.markdown("### Entry Time Performance Heatmap")
+
+            # Compute composite scores for the heatmap
             metrics_df_display = metrics_df.copy()
-            metrics_df_display['Entry_Time'] = metrics_df_display['Entry_Time'].apply(lambda x: x.strftime('%H:%M'))
-            # Pivot data for heatmap
-            heatmap_data = metrics_df_display.pivot_table(
-                index='Entry_Time',
-                columns='Day_of_week',
-                values='composite_score',
-                aggfunc='mean'
+            metrics_df_display["composite_score"] = metrics_df_display.apply(
+                lambda row: calculate_composite_score(row.to_dict(), active_weights),
+                axis=1
             )
-            
-            # Reorder columns
+            metrics_df_display["Entry_Time"] = metrics_df_display["Entry_Time"].apply(lambda x: x.strftime("%H:%M"))
+
+            # Pivot to Entry_Time (rows) × Day_of_week (cols)
+            heatmap_data = metrics_df_display.pivot_table(
+                index="Entry_Time",
+                columns="Day_of_week",
+                values="composite_score",
+                aggfunc="mean"
+            )
+
+            # Keep Mon–Fri order when present
             day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
             heatmap_data = heatmap_data.reindex(columns=[d for d in day_order if d in heatmap_data.columns])
-            
-            fig = px.imshow(
-                heatmap_data,
-                labels=dict(x="Day of Week", y="Entry Time", color="Score"),
-                color_continuous_scale="RdYlGn",
-                aspect="auto"
-            )
-            fig.update_layout(height=500)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Metric distribution
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("### Win Rate Distribution")
-                fig = px.histogram(
-                    metrics_df,
-                    x='win_rate',
-                    nbins=20,
-                    title="Win Rate Distribution"
+
+            if not heatmap_data.empty:
+                # Sort times chronologically (string "HH:MM" → datetime)
+                heatmap_data = heatmap_data.sort_index(key=lambda s: pd.to_datetime(s, format="%H:%M"))
+
+                fig = px.imshow(
+                    heatmap_data,
+                    labels=dict(x="Day of Week", y="Entry Time", color="Score"),
+                    color_continuous_scale="RdYlGn",
+                    aspect="auto"
                 )
-                fig.update_xaxes(title="Win Rate", tickformat='.0%')
-                fig.update_layout(height=350)
+                fig.update_layout(height=500)
                 st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                st.markdown("### Profit Distribution")
-                fig = px.histogram(
-                    metrics_df,
-                    x='avg_profit',
-                    nbins=20,
-                    title="Average Profit Distribution"
-                )
-                fig.update_xaxes(title="Average Profit ($)")
-                fig.update_layout(height=350)
-                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No heatmap data available with the current filters.")
+        else:
+            st.info("No metrics available to plot yet.")
+
     
     # ========== TAB 5: ALL TIMES ==========
     with tab5:
