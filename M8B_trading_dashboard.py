@@ -322,7 +322,6 @@ def load_historical_data(symbol, strategy):
             return pd.DataFrame()
 
     # Filter & format
-    # Filter & format (robust parsing)
     df = df[(df['Symbol'] == symbol) & (df['Name'] == strategy)].copy()
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Entry_Time'] = pd.to_datetime(df['Entry_Time'].astype(str), errors='coerce').dt.time
@@ -585,7 +584,13 @@ def main():
     # ========== SIDEBAR CONFIGURATION ==========
     with st.sidebar:
         st.title("⚙️ Settings")
-        
+   
+        if st.button("🔄 Force refresh data", use_container_width=True):
+            st.cache_data.clear()
+            st.session_state.pop("optimal_weeks", None)  # optional: force re-optimize
+            st.rerun()        
+
+
         # Strategy Selection
         st.subheader("📊 Strategy")
         
