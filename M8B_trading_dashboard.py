@@ -583,12 +583,7 @@ def main():
     
     # ========== SIDEBAR CONFIGURATION ==========
     with st.sidebar:
-        st.title("⚙️ Settings")
-   
-        if st.button("🔄 Force refresh data", use_container_width=True):
-            st.cache_data.clear()
-            st.session_state.pop("optimal_weeks", None)  # optional: force re-optimize
-            st.rerun()        
+        #st.title("⚙️ Settings")     
 
 
         # Strategy Selection
@@ -839,7 +834,12 @@ def main():
             format="%d",
             key="starting_balance"
         )
-    
+        st.markdown("---")
+
+        if st.button("🔄 Force refresh data", use_container_width=True):
+            st.cache_data.clear()
+            st.session_state.pop("optimal_weeks", None)  # optional: force re-optimize
+            st.rerun()   
     # ========== MAIN CONTENT AREA ==========
    
     # Load data first to get the latest date
