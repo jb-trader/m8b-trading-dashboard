@@ -14,7 +14,6 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from pathlib import Path
 import warnings
-import re
 import requests
 from io import BytesIO
 import config  as cfg
@@ -287,11 +286,10 @@ def get_score_color_style(score):
 # DATA PROCESSING
 # ============================================================================
 
-def _download_drive_bytes(file_id: str) -> bytes:
+def _download_drive_bytes() -> bytes:
     sess = requests.Session()
-    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    url = cfg.get_data_url()  # includes ?v=<date-based version> to bust caches
     r = sess.get(url, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True, timeout=30)
-    # If Google serves an HTML "confirm" page, follow it
     if "text/html" in r.headers.get("Content-Type", ""):
         import re as _re
         m = _re.search(r'href="([^"]+confirm[^"]+)"', r.text)
@@ -301,15 +299,20 @@ def _download_drive_bytes(file_id: str) -> bytes:
     r.raise_for_status()
     return r.content
 
+
 @st.cache_data(ttl=7200)
-def load_historical_data(symbol, strategy):
-    """Load historical data; try cloud first, fall back to local parquet."""
+def load_historical_data(symbol: str, strategy: str, data_version: str):
+    _ = data_version  # include version in cache key
+
     local_path = Path(r"D:/_Documents/Magic 8 Ball/data/dfe_table.parquet")
     df = pd.DataFrame()
 
-    # Try cloud (Google Drive)
     try:
-        data_bytes = _download_drive_bytes(cfg.GOOGLE_DRIVE_FILE_ID)
+        # If you updated the downloader to use cfg.get_data_url():
+        data_bytes = _download_drive_bytes()  
+        # Otherwise keep the old call:
+        # data_bytes = _download_drive_bytes(cfg.GOOGLE_DRIVE_FILE_ID)
+
         df = pd.read_parquet(BytesIO(data_bytes))
         source = "cloud"
     except Exception as e:
@@ -327,15 +330,11 @@ def load_historical_data(symbol, strategy):
     df['Entry_Time'] = pd.to_datetime(df['Entry_Time'].astype(str), errors='coerce').dt.time
     df = df.dropna(subset=['Date', 'Entry_Time'])
 
-
     # Sidebar status
-    try:
-        latest_date = df['Date'].max()
-        st.sidebar.success(f"✅ Data loaded from {source}")
-        if pd.notna(latest_date):
-            st.sidebar.caption(f"Latest date: {latest_date:%m/%d/%Y}")
-    except Exception:
-        pass
+    latest_date = df['Date'].max()
+    st.sidebar.success(f"✅ Data loaded from {source}")
+    if pd.notna(latest_date):
+        st.sidebar.caption(f"Latest date: {latest_date:%m/%d/%Y} • v={cfg.get_data_version()}")
 
     return df
 
@@ -423,7 +422,8 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
     
     try:
         # Load historical data once
-        df = load_historical_data(symbol, strategy)
+        df = load_historical_data(symbol, strategy, data_version=cfg.get_data_version())
+
         if df.empty:
             return 30  # Default fallback for other combinations
         
@@ -689,7 +689,7 @@ def main():
         with st.expander("📈 Week Range Analysis"):
             if st.button("Analyze All Ranges"):
                 with st.spinner("Analyzing..."):
-                    df = load_historical_data(symbol, strategy)
+                    df = load_historical_data(symbol, strategy, data_version=cfg.get_data_version())
                     if not df.empty:
                         analysis_results = []
                         for w in [4, 8, 12, 16, 20, 26, 30, 39, 52]:
@@ -845,7 +845,7 @@ def main():
     # Load data first to get the latest date
     with st.spinner("Loading data..."):
         # Load historical data
-        df = load_historical_data(symbol, strategy)
+        df = load_historical_data(symbol, strategy, data_version=cfg.get_data_version())
         
         if df.empty:
             st.error("No data available for selected symbol and strategy")

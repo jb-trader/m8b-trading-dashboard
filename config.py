@@ -1,18 +1,29 @@
-"""
-M8B Trading Dashboard Configuration
-Cloud deployment version
-"""
-#   https://drive.google.com/file/d/1-N9DUSIxm0zSE9YEor0G9F1IoUwbSQG9/view?usp=sharing
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+def current_data_version_at_430_et() -> str:
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    cutoff = time(16, 30)  # 4:30 pm ET
+    data_day = now_et.date() if now_et.time() >= cutoff else (now_et - timedelta(days=1)).date()
+    return data_day.strftime("%Y-%m-%d")
+
 GOOGLE_DRIVE_FILE_ID = "1-N9DUSIxm0zSE9YEor0G9F1IoUwbSQG9"
 
-def get_data_url():
-    """Generate direct download URL for Google Drive"""
-    return f"https://drive.google.com/uc?export=download&id={GOOGLE_DRIVE_FILE_ID}"
+def get_data_version() -> str:
+    """Compute version each call so it flips at 4:30pm ET without reload."""
+    return current_data_version_at_430_et()
 
-# Version info
+def get_data_url() -> str:
+    """Include version query to bust HTTP caches."""
+    return f"https://drive.google.com/uc?export=download&id={GOOGLE_DRIVE_FILE_ID}&v={get_data_version()}"
+
+# Meta
 VERSION = "2.0.0"
 DEPLOYMENT = "Cloud"
 LAST_DATA_UPDATE = "Updates daily after market close"
+
+# FOMC_DATES and EARNINGS_DATES ... (your lists are fine)
+
 
 # Exclusion dates
 #  use this source:   https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
