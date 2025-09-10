@@ -739,7 +739,6 @@ def main():
     print(f"\nUsing dates from config.py:")
     print(f"  - FOMC dates: {len(Config.FOMC_DATES)} dates")
     print(f"  - Earnings dates: {len(Config.EARNINGS_DATES)} dates")
-    print(f"  - Holiday dates: {len(Config.HOLIDAY_DATES)} dates")
     
     # Create output directory
     Config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
