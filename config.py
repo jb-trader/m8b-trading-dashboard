@@ -24,7 +24,7 @@ LAST_DATA_UPDATE = "Updates daily after market close"
 
 # FOMC_DATES and EARNINGS_DATES ... (your lists are fine)
 
-
+HOLIDAY_DATES = []
 # Exclusion dates
 #  use this source:   https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
 FOMC_DATES = [
