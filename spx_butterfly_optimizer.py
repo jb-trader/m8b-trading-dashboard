@@ -15,6 +15,7 @@ from functools import lru_cache
 import time
 from typing import Dict, List, Tuple, Optional
 import multiprocessing as mp
+import config as cfg  # Import config module for dates
 
 # Try to import optimization libraries
 try:
@@ -44,26 +45,36 @@ class Config:
     
     MIN_TRADES = 3
     
-    # Exclusion dates
-    FOMC_DATES = pd.to_datetime([
-        "2024-01-31", "2024-03-20", "2024-05-01", "2024-06-12",
-        "2024-07-31", "2024-09-18", "2024-11-07", "2024-12-18",
-        "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18"
-    ])
-    
-    EARNINGS_DATES = pd.to_datetime([
-        "2024-01-30", "2024-02-01", "2024-02-21", "2024-03-07", "2024-04-24", "2024-04-25", "2024-04-30",
-        "2024-05-02", "2024-05-22", "2024-06-12", "2024-07-30", "2024-07-31", "2024-08-01", "2024-08-28",
-        "2024-09-05", "2024-10-30", "2024-10-31", "2024-11-20", "2024-12-12", "2025-01-29", "2025-01-30",
-        "2025-02-06", "2025-02-26", "2025-03-06", "2025-04-30", "2025-05-01", "2025-05-28", "2025-06-05",
-        "2025-07-30", "2025-07-31", "2025-08-27"
-    ])
-    
-    HOLIDAY_DATES = pd.to_datetime([
-        "2024-01-15", "2024-02-19", "2024-05-27", "2024-06-19", "2024-07-04",
-        "2024-09-02", "2024-11-28", "2024-12-25", "2025-01-01", "2025-01-20",
-        "2025-02-17", "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01"
-    ])
+    # Exclusion dates - MUST come from config.py
+    # This will fail explicitly if config.py is missing or doesn't have the required attributes
+    try:
+        # Try to get FOMC dates
+        if hasattr(cfg, 'FOMC_DATES'):
+            FOMC_DATES = pd.to_datetime(cfg.FOMC_DATES)
+        else:
+            raise AttributeError("config.py is missing FOMC_DATES")
+        
+        # Try to get earnings dates (check for function or attribute)
+        if hasattr(cfg, 'get_earnings_dates') and callable(cfg.get_earnings_dates):
+            EARNINGS_DATES = pd.to_datetime(cfg.get_earnings_dates())
+        elif hasattr(cfg, 'EARNINGS_DATES'):
+            EARNINGS_DATES = pd.to_datetime(cfg.EARNINGS_DATES)
+        else:
+            raise AttributeError("config.py is missing EARNINGS_DATES or get_earnings_dates()")
+        
+        # Try to get holiday dates
+        if hasattr(cfg, 'HOLIDAY_DATES'):
+            HOLIDAY_DATES = pd.to_datetime(cfg.HOLIDAY_DATES)
+        else:
+            raise AttributeError("config.py is missing HOLIDAY_DATES")
+            
+    except AttributeError as e:
+        print(f"\n❌ ERROR: {e}")
+        print(f"Please ensure config.py contains all required date lists:")
+        print(f"  - FOMC_DATES")
+        print(f"  - EARNINGS_DATES (or get_earnings_dates() function)")
+        print(f"  - HOLIDAY_DATES")
+        raise SystemExit(1)
     
     DOW_LEVELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
@@ -703,7 +714,8 @@ class ReportGenerator:
             Data filtered for FOMC dates, earnings dates, and holidays<br>
             Each metric optimized with its own lookback period<br><br>
             <strong>Highlighting:</strong> Times appearing in multiple metrics are highlighted in blue<br>
-            (Darker blue = appears in more metrics)
+            (Darker blue = appears in more metrics)<br><br>
+            <strong>Dates sourced from config.py</strong>
         </div>
     </div>
 </body>
@@ -722,6 +734,12 @@ def main():
     print("\n" + "="*60)
     print(f"     {Config.SYMBOL} {Config.STRATEGY} MULTI-METRIC OPTIMIZATION")
     print("="*60)
+    
+    # Print date source info
+    print(f"\nUsing dates from config.py:")
+    print(f"  - FOMC dates: {len(Config.FOMC_DATES)} dates")
+    print(f"  - Earnings dates: {len(Config.EARNINGS_DATES)} dates")
+    print(f"  - Holiday dates: {len(Config.HOLIDAY_DATES)} dates")
     
     # Create output directory
     Config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -795,4 +813,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
