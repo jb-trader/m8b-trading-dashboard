@@ -33,7 +33,7 @@ FOMC_DATES = [
     "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18",
     "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10"
 ]
-# run  "D:\_Documents\Magic 8 Ball\earnings and fomc impact\update_earnings_script.py"
+# run  "D:\_Documents\Magic 8 Ball\earnings and fomc impact\update_earnings_script.py" ###############################################
 
 EARNINGS_DATES = [
     "2024-01-24", "2024-01-25", "2024-01-30", "2024-01-31",
