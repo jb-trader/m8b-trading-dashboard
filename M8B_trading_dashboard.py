@@ -511,37 +511,39 @@ def add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings):
         st.write("### Date Range Analysis")
         debug_data = debug_date_filtering(df, weeks_history, exclude_fomc, exclude_earnings)
 
-        summary_data = []
+        # Build summary with required columns only
+        summary_rows = []
         for day, info in debug_data.items():
-            summary_data.append({
+            earnings_total = len(info.get('earnings', [])) + len(info.get('earnings_plus1', []))
+            summary_rows.append({
                 'Day': day,
-                'Total in Range': info['total_available'],
-                'FOMC Excluded': len(info['fomc']),
-                'Earnings (E) Excluded': len(info['earnings']),
-                'Earnings (E+1) Excluded': len(info['earnings_plus1']),
-                'Late Time Excluded': len(info['late_time']),
-                'Final Count': info['final_count']
+                'Total in Range': info.get('total_available', 0),
+                'FOMC Excluded': len(info.get('fomc', [])),
+                'Earnings Excluded': earnings_total,  # E and E+1 combined
             })
-        summary_df = pd.DataFrame(summary_data)
+
+        summary_df = pd.DataFrame(summary_rows, columns=[
+            'Day', 'Total in Range', 'FOMC Excluded', 'Earnings Excluded'
+        ])
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
+        # Optional per-day details: show combined earnings list
         selected_day = st.selectbox("View details for:", list(debug_data.keys()))
         if selected_day:
             day_info = debug_data[selected_day]
+            # Combine E and E+1 because config already includes both in EARNINGS_DATES
+            earnings_combined = sorted(set(day_info.get('earnings', [])) | set(day_info.get('earnings_plus1', [])))
+
             col1, col2 = st.columns(2)
             with col1:
                 st.write("**Excluded Dates:**")
-                if day_info['fomc']:
+                if day_info.get('fomc'):
                     st.write(f"FOMC: {', '.join(day_info['fomc'])}")
-                if day_info['earnings']:
-                    st.write(f"Earnings (E): {', '.join(day_info['earnings'])}")
-                if day_info['earnings_plus1']:
-                    st.write(f"Earnings (E+1): {', '.join(day_info['earnings_plus1'])}")
-                if day_info['late_time']:
-                    st.write(f"Late Time: {', '.join(day_info['late_time'])}")
+                if exclude_earnings and earnings_combined:
+                    st.write(f"Earnings (E & E+1): {', '.join(earnings_combined)}")
             with col2:
                 st.write("**Included Dates:**")
-                included = day_info['dates_included']
+                included = day_info.get('dates_included', [])
                 if len(included) > 10:
                     st.write(f"First 5: {', '.join(included[:5])}")
                     st.write(f"Last 5: {', '.join(included[-5:])}")
@@ -549,12 +551,14 @@ def add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings):
                 else:
                     st.write(', '.join(included))
 
-        st.write("### Date Range Info")
+        # Date range footer
         end_date = df['Date'].max()
         start_date = end_date - timedelta(weeks=weeks_history)
+        st.write("### Date Range Info")
         st.write(f"- Start: {start_date:%Y-%m-%d}")
         st.write(f"- End: {end_date:%Y-%m-%d}")
         st.write(f"- Weeks: {weeks_history}")
+
 
 
 # ============================================================================
@@ -629,10 +633,10 @@ def main():
         st.subheader("⚖️ Metric Weights")
         if 'metric_weights' not in st.session_state:
             st.session_state.metric_weights = {
-                'sortino_ratio': {'enabled': True, 'weight': 30},
+                'sortino_ratio': {'enabled': False, 'weight': 30},
                 'avg_profit': {'enabled': True, 'weight': 30},
-                'win_rate': {'enabled': True, 'weight': 20},
-                'profit_factor': {'enabled': True, 'weight': 20}
+                'win_rate': {'enabled': False, 'weight': 20},
+                'profit_factor': {'enabled': False, 'weight': 20}
             }
         metrics_config = {
             'sortino_ratio': {'label': '📊 Sortino Ratio', 'desc': 'Risk-adjusted returns'},
@@ -884,7 +888,7 @@ def main():
 
         col1, col2, col3, col4 = st.columns([1.5, 1.5, 2, 2])
         with col1:
-            training_weeks = st.slider("Training Window", 4, 26, value=8, key="fwd_training_weeks")
+            training_weeks = st.slider("Training Window", 4, 26, value=6, key="fwd_training_weeks")
         with col2:
             trading_weeks = st.slider("Trading Window", 1, 8, value=2, key="fwd_trading_weeks")
         with col3:
@@ -899,7 +903,7 @@ def main():
         with col2:
             fwd_exclude_fomc = st.checkbox("Exclude FOMC", value=exclude_fomc, key="fwd_exclude_fomc")
         with col3:
-            fwd_exclude_earnings = st.checkbox("Exclude Earnings (E+1)", value=exclude_earnings, key="fwd_exclude_earnings")
+            fwd_exclude_earnings = st.checkbox("Exclude Earnings (E+1)", value=False, key="fwd_exclude_earnings")
 
         with st.spinner("Running forward test simulation..."):
             df_for_fwd = df.copy()
