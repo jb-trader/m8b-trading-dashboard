@@ -209,6 +209,8 @@ def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=Tru
 
     if exclude_fomc and len(fomc_idx) > 0:
         filtered = filtered[~filtered['Date'].isin(fomc_idx)]
+    
+
     if exclude_earnings and len(earn_idx) > 0:
         filtered = filtered[~filtered['Date'].isin(earn_idx)]
 
@@ -388,6 +390,7 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
             continue
 
         selected_times = top_times_df[top_times_df['rank'] == rank][['Day_of_week', 'Entry_Time']].copy()
+
         retraining_log.append({
             'Training Start': current_start,
             'Training End': training_end,
@@ -397,9 +400,11 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
         })
 
         # --- TRADING slice (trading_start <= Date < trading_end)
-        trading_data = df[(df['Date'] >= trading_start) & (df['Date'] < trading_end)].copy()
+        trading_data = df[(df['Date'] >= trading_start) & (df['Date'] <= trading_end)].copy()
+
         if exclude_fomc and len(fomc_idx) > 0:
             trading_data = trading_data[~trading_data['Date'].isin(fomc_idx)]
+
         if exclude_earnings and len(earn_idx) > 0:
             trading_data = trading_data[~trading_data['Date'].isin(earn_idx)]
         if day_filter != "All Days":
@@ -525,7 +530,7 @@ def add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings):
         summary_df = pd.DataFrame(summary_rows, columns=[
             'Day', 'Total in Range', 'FOMC Excluded', 'Earnings Excluded'
         ])
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        st.dataframe(summary_df, width='stretch', hide_index=True)
 
         # Optional per-day details: show combined earnings list
         selected_day = st.selectbox("View details for:", list(debug_data.keys()))
@@ -634,8 +639,8 @@ def main():
         if 'metric_weights' not in st.session_state:
             st.session_state.metric_weights = {
                 'sortino_ratio': {'enabled': False, 'weight': 30},
-                'avg_profit': {'enabled': True, 'weight': 30},
-                'win_rate': {'enabled': False, 'weight': 20},
+                'avg_profit': {'enabled': True, 'weight': 12},
+                'win_rate': {'enabled': True, 'weight': 51},
                 'profit_factor': {'enabled': False, 'weight': 20}
             }
         metrics_config = {
@@ -682,7 +687,7 @@ def main():
         starting_balance = st.number_input("Starting Account Balance ($)", 1000, 1000000, value=10000, step=1000, format="%d", key="starting_balance")
 
         st.markdown("---")
-        if st.button("🔄 Force refresh data", use_container_width=True):
+        if st.button("🔄 Force refresh data", width='stretch'):
             st.cache_data.clear()
             st.session_state.pop("optimal_weeks", None)
             st.rerun()
@@ -778,7 +783,7 @@ def main():
                         return ''
                     return df_to_style.style.map(color_score, subset=['Score'])
                 styled_df = style_scores(display_df)
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                st.dataframe(styled_df, width='stretch', hide_index=True)
         else:
             st.warning("Not enough data to display top times")
 
@@ -839,7 +844,7 @@ def main():
                     height=700,
                     hovermode='x unified'
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 c1, c2, c3, c4 = st.columns(4)
                 total_trades = len(rank_filtered_df)
@@ -890,7 +895,7 @@ def main():
         with col1:
             training_weeks = st.slider("Training Window", 4, 26, value=6, key="fwd_training_weeks")
         with col2:
-            trading_weeks = st.slider("Trading Window", 1, 8, value=2, key="fwd_trading_weeks")
+            trading_weeks = st.slider("Trading Window", 1, 8, value=1, key="fwd_trading_weeks")
         with col3:
             fwd_rank = st.selectbox("Select Rank", [1, 2, 3], format_func=lambda x: f"{'1st' if x==1 else '2nd' if x==2 else '3rd'} Rank", key="fwd_rank_selector")
         with col4:
@@ -924,11 +929,6 @@ def main():
                     include_earn=fwd_exclude_earnings,
                     include_eplus1=True
                 )
-                # 🔍 DEBUG: show excluded counts + sample dates
-                print("Excluded earnings count:", len(earn_idx))
-                if len(earn_idx) > 0:
-                    print("First few excluded earnings dates:",
-                        [d.strftime("%Y-%m-%d") for d in sorted(list(earn_idx))[:5]])
                 hindsight_filtered = df_for_fwd.copy()
                 if fwd_exclude_fomc and len(fomc_idx) > 0:
                     hindsight_filtered = hindsight_filtered[~hindsight_filtered["Date"].isin(fomc_idx)]
@@ -956,7 +956,7 @@ def main():
                     xaxis_title="Date", yaxis_title="Account Value ($)", yaxis_tickformat="$,.0f",
                     height=600, hovermode="x unified"
                 )
-                st.plotly_chart(fig, use_container_width= True)
+                st.plotly_chart(fig, width='stretch')
 
                 if not trades_df.empty:
                     st.subheader("Trade Analysis")
@@ -980,7 +980,6 @@ def main():
 
                 training_start = most_recent_date - timedelta(weeks=training_weeks)
                 recent_training = df_for_fwd[(df_for_fwd["Date"] >= training_start) & (df_for_fwd["Date"] <= most_recent_date)].copy()
-
 
                 if fwd_exclude_fomc and len(fomc_idx) > 0:
                     recent_training = recent_training[~recent_training['Date'].isin(fomc_idx)]
@@ -1011,6 +1010,83 @@ def main():
             else:
                 st.warning("Not enough trades to plot an equity curve for the selected parameters.")
 
+        # === EXPORT SECTION - MOVED OUTSIDE THE IF/ELSE BLOCKS ===
+        st.markdown("---")
+        st.markdown("### 📥 Export Trade Details to CSV")
+        
+        export_col1, export_col2, export_col3 = st.columns([2, 3, 2])
+        
+        with export_col1:
+            export_button = st.button("🔍 Generate CSV Export", type="secondary", 
+                                    help="Export all forward test trades with selected times for each window")
+        
+        if export_button:
+            with st.spinner("Generating trade export..."):
+                # Prepare data for export
+                df_for_export = df_for_fwd.copy()
+                
+                # Re-run forward test but capture more details
+                equity_df_export, trades_df_export, retraining_df_export = run_forward_test(
+                    df_for_export, training_weeks, trading_weeks, fwd_rank, fwd_day,
+                    active_weights, contracts, starting_balance,
+                    fwd_exclude_fomc, fwd_exclude_earnings
+                )
+                
+                if not trades_df_export.empty:
+                    # Create the CSV with requested columns
+                    export_data = trades_df_export[['Date', 'Day', 'Time', 'Profit']].copy()
+                    export_data.columns = ['Date', 'Day_of_Week', 'Trade_Time', 'Profit']
+                    
+                    # Format the data nicely
+                    export_data['Date'] = pd.to_datetime(export_data['Date']).dt.strftime('%Y-%m-%d')
+                    export_data['Trade_Time'] = export_data['Trade_Time'].apply(
+                        lambda x: x.strftime('%H:%M') if hasattr(x, 'strftime') else str(x)
+                    )
+                    export_data['Profit'] = export_data['Profit'].round(2)
+                    
+                    # Generate CSV
+                    csv_buffer = export_data.to_csv(index=False)
+                    
+                    # Create filename with parameters
+                    filename = f"forward_test_{symbol}_{strategy}_rank{fwd_rank}_train{training_weeks}w_trade{trading_weeks}w.csv"
+                    
+                    with export_col2:
+                        st.download_button(
+                            label="📊 Download CSV File",
+                            data=csv_buffer,
+                            file_name=filename,
+                            mime="text/csv",
+                            width='stretch'
+                        )
+                        
+                    with export_col3:
+                        st.success(f"✅ {len(export_data)} trades ready")
+                    
+                    # Show preview
+                    with st.expander("Preview Export Data (first 10 rows)"):
+                        st.dataframe(export_data.head(10), width='stretch', hide_index=True)
+                        
+                        # Add summary stats
+                        col_a, col_b, col_c = st.columns(3)
+                        with col_a:
+                            st.metric("Total Trades", len(export_data))
+                        with col_b:
+                            st.metric("Total Profit", f"${export_data['Profit'].sum():,.2f}")
+                        with col_c:
+                            st.metric("Avg per Trade", f"${export_data['Profit'].mean():,.2f}")
+                else:
+                    st.warning("No trades found with current settings to export")
+        
+        # Also add a section showing current window's selected times (if available)
+        if 'current_times' in locals() and not current_times.empty:
+            with st.expander("📋 View Current Window's Selected Times"):
+                times_for_display = current_times[['Day_of_week', 'Entry_Time', 'composite_score']].copy()
+                times_for_display['Entry_Time'] = times_for_display['Entry_Time'].apply(
+                    lambda x: x.strftime('%H:%M') if hasattr(x, 'strftime') else str(x)
+                )
+                times_for_display['composite_score'] = times_for_display['composite_score'].round(3)
+                times_for_display.columns = ['Day', 'Time', 'Score']
+                st.dataframe(times_for_display, width='stretch', hide_index=True)
     # TAB 4: ANALYSIS
     with tab4:
         st.subheader("📊 Trading Analysis")
@@ -1034,7 +1110,7 @@ def main():
                     color_continuous_scale="RdYlGn", aspect="auto"
                 )
                 fig.update_layout(height=500)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
             else:
                 st.info("No heatmap data available with the current filters.")
         else:
@@ -1061,7 +1137,7 @@ def main():
             display_all['Win Rate'] = (display_all['Win Rate'] * 100).round(1)
             display_all['Profit Factor'] = display_all['Profit Factor'].round(2)
             display_all.insert(0, 'Rank', range(1, len(display_all) + 1))
-            st.dataframe(display_all.head(50), use_container_width =True, hide_index=True)
+            st.dataframe(display_all.head(50), width='stretch', hide_index=True)
             st.caption(f"Showing top 50 of {len(display_all)} total entry times")
 
     # TAB 6: VALIDATION (unchanged wiring, module optional)
