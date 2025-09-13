@@ -1143,21 +1143,441 @@ def main():
     # TAB 6: VALIDATION (unchanged wiring, module optional)
     with tab6:
         st.subheader("✅ Statistical Validation")
+        
+        # Import validation module
+        try:
+            from robust_validation_module import (
+                WalkForwardValidator, 
+                MonteCarloTester, 
+                PatternStabilityAnalyzer
+            )
+            VALIDATION_AVAILABLE = True
+        except ImportError:
+            VALIDATION_AVAILABLE = False
+            st.error("❌ Validation module not found. Please ensure robust_validation_module.py is in the same directory.")
+            st.stop()
+        
+        # Info section
         st.info("""
-        This tab runs optional validation modules if available:
-        1) Walk-Forward Analysis
-        2) Monte Carlo Significance
-        3) Pattern Stability
+        This comprehensive validation suite tests your trading patterns for statistical significance:
+        
+        • **Walk-Forward Analysis** - Tests pattern persistence in out-of-sample data  
+        • **Monte Carlo Testing** - Determines if patterns are statistically significant or random  
+        • **Pattern Stability** - Examines pattern consistency over time  
+        • **Reliability Scoring** - Provides overall assessment of pattern validity
         """)
-        if st.button("Run Complete Validation", type="primary"):
-            processing_container = st.empty()
-            processing_container.warning("🔄 VALIDATION IN PROGRESS...")
+        
+        # Initialize session state for validation
+        if 'validation_results' not in st.session_state:
+            st.session_state.validation_results = None
+        if 'validation_running' not in st.session_state:
+            st.session_state.validation_running = False
+        
+        # Control buttons
+        col1, col2, col3 = st.columns([1, 1, 3])
+        
+        with col1:
+            run_validation = st.button("🚀 Run Complete Validation", type="primary", 
+                                    disabled=st.session_state.validation_running)
+        
+        with col2:
+            if st.session_state.validation_results:
+                if st.button("🔄 Clear Results"):
+                    st.session_state.validation_results = None
+                    st.session_state.validation_running = False
+                    st.rerun()
+        
+        with col3:
+            if st.session_state.validation_running:
+                st.info("⏳ Validation in progress... This may take 1-2 minutes.")
+        
+        # Run validation when button clicked
+        if run_validation:
+            st.session_state.validation_running = True
+            st.session_state.validation_results = None
+            
+            # Prepare data for validation
+            validation_df = filtered_df.copy()
+            validation_df['Profit'] = validation_df['Profit'] * contracts
+            
+            # Progress tracking
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
             try:
-                from robust_validation_module import WalkForwardValidator, MonteCarloTester, PatternStabilityAnalyzer
-                processing_container.info("Validation modules loaded. Run your routines here as before.")
-            except ImportError:
-                processing_container.empty()
-                st.error("robust_validation_module.py not found. Install or place it in the same folder and retry.")
+                # ============================================================
+                # 1. WALK-FORWARD ANALYSIS
+                # ============================================================
+                with st.expander("📊 Walk-Forward Analysis", expanded=True):
+                    status_text.text("Running walk-forward analysis...")
+                    progress_bar.progress(10)
+                    
+                    # Parameters
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        training_weeks = 12
+                        st.metric("Training Weeks", training_weeks)
+                    with col2:
+                        testing_weeks = 4
+                        st.metric("Testing Weeks", testing_weeks)
+                    with col3:
+                        step_weeks = 2
+                        st.metric("Step Weeks", step_weeks)
+                    
+                    # Run walk-forward analysis
+                    wf_validator = WalkForwardValidator(
+                        validation_df, 
+                        training_weeks=training_weeks,
+                        testing_weeks=testing_weeks,
+                        step_weeks=step_weeks
+                    )
+                    
+                    progress_bar.progress(25)
+                    
+                    # Get active weights from sidebar
+                    active_weights_for_validation = {
+                        k: v['weight'] for k, v in st.session_state.metric_weights.items() 
+                        if v['enabled']
+                    }
+                    
+                    wf_results = wf_validator.run_analysis(
+                        active_weights_for_validation, 
+                        top_n_times=3, 
+                        contracts=contracts
+                    )
+                    
+                    progress_bar.progress(35)
+                    
+                    if wf_results:
+                        st.markdown("#### Results")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Windows Tested", wf_results['total_windows'])
+                        with col2:
+                            st.metric("Profitable Windows", 
+                                    f"{wf_results['profitable_windows']}/{wf_results['total_windows']}")
+                        with col3:
+                            delta = wf_results['success_rate'] - 50
+                            st.metric("Success Rate", f"{wf_results['success_rate']:.1f}%",
+                                    delta=f"{delta:+.1f}%")
+                        with col4:
+                            st.metric("Consistency Score", f"{wf_results['consistency_score']:.0f}/100")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Avg Out-of-Sample Profit", f"${wf_results['avg_test_profit']:.2f}")
+                        with col2:
+                            st.metric("Avg Out-of-Sample Win Rate", f"{wf_results['avg_test_win_rate']:.1f}%")
+                        
+                        # Assessment
+                        if wf_results['success_rate'] < 50:
+                            st.error("⚠️ WARNING: Pattern fails in majority of out-of-sample tests!")
+                        elif wf_results['success_rate'] > 70:
+                            st.success("✅ Pattern shows good out-of-sample consistency")
+                        else:
+                            st.warning("🔶 Pattern shows moderate out-of-sample performance")
+                    else:
+                        st.warning("Insufficient data for walk-forward analysis")
+                        wf_results = {'success_rate': 0, 'consistency_score': 0}
+                
+                # ============================================================
+                # 2. MONTE CARLO SIGNIFICANCE TEST
+                # ============================================================
+                progress_bar.progress(40)
+                
+                with st.expander("🎲 Monte Carlo Significance Test", expanded=True):
+                    status_text.text("Running Monte Carlo simulations...")
+                    
+                    # Parameters
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        n_simulations = 200
+                        st.metric("Simulations", n_simulations)
+                    with col2:
+                        test_metric = 'profit'
+                        st.metric("Test Metric", test_metric.capitalize())
+                    
+                    # Get top times for testing
+                    grouped = validation_df.groupby(['Day_of_week', 'Entry_Time'])['Profit'].mean().nlargest(10)
+                    best_times = [(day, time) for (day, time) in grouped.index]
+                    
+                    # Run Monte Carlo test
+                    mc_tester = MonteCarloTester(validation_df, n_simulations=n_simulations)
+                    progress_bar.progress(50)
+                    
+                    mc_results = mc_tester.test_time_pattern_significance(best_times, metric=test_metric)
+                    
+                    progress_bar.progress(60)
+                    
+                    st.markdown("#### Results")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Actual Performance", f"${mc_results['actual_performance']:.2f}")
+                    with col2:
+                        st.metric("Random Avg", 
+                                f"${mc_results['simulated_mean']:.2f}")
+                    with col3:
+                        st.metric("Z-Score", f"{mc_results['z_score']:.2f}")
+                    with col4:
+                        st.metric("Percentile", f"{mc_results['percentile']:.1f}%")
+                    
+                    # P-value and significance
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("P-Value", f"{mc_results['p_value']:.4f}",
+                                help="Probability that results are due to chance")
+                    with col2:
+                        if mc_results['is_significant']:
+                            st.success("✅ Pattern is STATISTICALLY SIGNIFICANT (p < 0.05)")
+                        else:
+                            st.error("❌ Pattern is NOT statistically significant (could be random)")
+                    
+                                        
+                    # Create histogram visualization
+                    fig = go.Figure()
+                    
+                    # Generate simulated distribution for visualization
+                    
+                    simulated_dist = np.random.normal(
+                        mc_results['simulated_mean'],
+                        mc_results['simulated_std'],
+                        n_simulations
+                    )
+                    
+                    fig.add_trace(go.Histogram(
+                        x=simulated_dist,
+                        name='Random Distribution',
+                        opacity=0.7,
+                        marker_color='lightblue'
+                    ))
+                    
+                    # Add actual performance line
+                    fig.add_vline(
+                        x=mc_results['actual_performance'],
+                        line_dash="dash",
+                        line_color="red",
+                        annotation_text="Actual Performance"
+                    )
+                    
+                    fig.update_layout(
+                        title="Monte Carlo Simulation Results",
+                        xaxis_title="Performance ($)",
+                        yaxis_title="Frequency",
+                        showlegend=True,
+                        height=400
+                    )
+                    
+                    st.plotly_chart(fig, width='stretch')
+                
+                # ============================================================
+                # 3. PATTERN STABILITY ANALYSIS
+                # ============================================================
+                progress_bar.progress(70)
+                
+                with st.expander("📈 Pattern Stability Analysis", expanded=True):
+                    status_text.text("Analyzing pattern stability...")
+                    
+                    stability_analyzer = PatternStabilityAnalyzer(validation_df)
+                    
+                    st.markdown("#### Top 5 Times Stability Check")
+                    
+                    # Analyze stability for top 5 times
+                    stability_data = []
+                    for i, (day, time) in enumerate(best_times[:5]):
+                        stability = stability_analyzer.analyze_time_stability(day, time)
+                        if stability:
+                            trend_indicator = "↓" if stability['is_deteriorating'] else "↑" if abs(stability['trend_slope']) < 5 else "→"
+                            
+                            stability_data.append({
+                                'Day': day,
+                                'Time': time.strftime('%H:%M') if hasattr(time, 'strftime') else str(time),
+                                'Stability Score': stability['stability_score'],
+                                'Avg Profit': f"${stability['avg_profit_mean']:.2f}",
+                                'Win Rate': f"{stability['win_rate_mean']:.1f}%",
+                                'Trend': trend_indicator,
+                                'Periods': stability['periods_analyzed']
+                            })
+                    
+                    progress_bar.progress(80)
+                    
+                    if stability_data:
+                        stability_df = pd.DataFrame(stability_data)
+                        
+                        # Display with color coding
+                        def color_stability(val):
+                            if isinstance(val, (int, float)):
+                                if val >= 70:
+                                    return 'background-color: #90EE90'  # Light green
+                                elif val >= 50:
+                                    return 'background-color: #FFFFE0'  # Light yellow
+                                else:
+                                    return 'background-color: #FFB6C1'  # Light red
+                            return ''
+                        
+                        styled_df = stability_df.style.applymap(
+                            color_stability, 
+                            subset=['Stability Score']
+                        )
+                        st.dataframe(styled_df, width='stretch')
+                        
+                        # Calculate average stability
+                        avg_stability = np.mean([s['Stability Score'] for s in stability_data])
+                    else:
+                        st.warning("Insufficient data for stability analysis")
+                        avg_stability = 50  # Default
+                
+                # ============================================================
+                # 4. FINAL ASSESSMENT
+                # ============================================================
+                progress_bar.progress(90)
+                
+                with st.expander("🎯 Final Assessment", expanded=True):
+                    status_text.text("Calculating final assessment...")
+                    
+                    # Calculate overall reliability score
+                    reliability_score = 0
+                    reliability_components = []
+                    
+                    # Walk-forward component
+                    if wf_results and wf_results.get('success_rate', 0) > 0:
+                        wf_score = min(wf_results['success_rate'], 100) * 0.4
+                        reliability_score += wf_score
+                        reliability_components.append(('Walk-Forward', wf_score, 40))
+                    else:
+                        reliability_components.append(('Walk-Forward', 0, 40))
+                    
+                    # Monte Carlo component
+                    if mc_results['is_significant']:
+                        mc_score = min(mc_results['percentile'], 100) * 0.3
+                        reliability_score += mc_score
+                        reliability_components.append(('Statistical Significance', mc_score, 30))
+                    else:
+                        reliability_components.append(('Statistical Significance', 0, 30))
+                    
+                    # Stability component
+                    if stability_data:
+                        stability_score = avg_stability * 0.3
+                    else:
+                        stability_score = 15  # Default moderate stability
+                    reliability_score += stability_score
+                    reliability_components.append(('Pattern Stability', stability_score, 30))
+                    
+                    # Display overall score
+                    st.markdown("#### Overall Reliability Score")
+                    
+                    col1, col2 = st.columns([1, 2])
+                    
+                    with col1:
+                        # Create gauge chart
+                        fig = go.Figure(go.Indicator(
+                            mode="gauge+number",
+                            value=reliability_score,
+                            domain={'x': [0, 1], 'y': [0, 1]},
+                            title={'text': "Reliability Score"},
+                            gauge={
+                                'axis': {'range': [None, 100]},
+                                'bar': {'color': "darkblue"},
+                                'steps': [
+                                    {'range': [0, 50], 'color': "lightgray"},
+                                    {'range': [50, 70], 'color': "yellow"},
+                                    {'range': [70, 100], 'color': "lightgreen"}
+                                ],
+                                'threshold': {
+                                    'line': {'color': "red", 'width': 4},
+                                    'thickness': 0.75,
+                                    'value': 70
+                                }
+                            }
+                        ))
+                        fig.update_layout(height=250)
+                        st.plotly_chart(fig, width='stretch')
+                    
+                    with col2:
+                        st.markdown("##### Score Components")
+                        for name, score, max_score in reliability_components:
+                            pct = (score / max_score) * 100 if max_score > 0 else 0
+                            st.progress(pct / 100)
+                            st.caption(f"{name}: {score:.1f}/{max_score} ({pct:.0f}%)")
+                    
+                    # Recommendation
+                    st.markdown("---")
+                    st.markdown("#### 📋 Recommendation")
+                    
+                    if reliability_score >= 70:
+                        st.success("""
+                        ✅ **STRONG VALIDITY** - Pattern shows strong statistical validity
+                        
+                        • Consider paper trading to verify real-world performance
+                        • Monitor pattern stability over time
+                        • Implement proper risk management
+                        """)
+                    elif reliability_score >= 50:
+                        st.warning("""
+                        🔶 **MODERATE VALIDITY** - Pattern shows moderate validity
+                        
+                        • Requires further testing before live trading
+                        • Consider reducing position size
+                        • Monitor closely for degradation
+                        """)
+                    else:
+                        st.error("""
+                        ❌ **WEAK VALIDITY** - Pattern lacks statistical validity
+                        
+                        • High risk of overfitting
+                        • NOT recommended for live trading
+                        • Consider different time periods or strategies
+                        """)
+                    
+                    # Store results
+                    st.session_state.validation_results = {
+                        'walk_forward': wf_results,
+                        'monte_carlo': mc_results,
+                        'stability_data': stability_data if 'stability_data' in locals() else [],
+                        'reliability_score': reliability_score,
+                        'timestamp': datetime.now()
+                    }
+                
+                progress_bar.progress(100)
+                status_text.text("✅ Validation complete!")
+                
+            except Exception as e:
+                st.error(f"Error during validation: {str(e)}")
+                st.exception(e)
+            finally:
+                st.session_state.validation_running = False
+                # Clean up progress indicators
+                progress_bar.empty()
+                status_text.empty()
+        
+        # Display previous results if available
+        elif st.session_state.validation_results and not st.session_state.validation_running:
+            results = st.session_state.validation_results
+            
+            st.success(f"✅ Last validation completed at {results['timestamp'].strftime('%H:%M:%S')}")
+            
+            # Quick summary
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                score = results['reliability_score']
+                if score >= 70:
+                    delta_color = "off"
+                else:
+                    delta_color = "inverse"
+                st.metric("Overall Reliability", f"{score:.1f}/100", delta_color=delta_color)
+            with col2:
+                if results.get('walk_forward') and results['walk_forward'].get('success_rate'):
+                    st.metric("Walk-Forward Success", 
+                            f"{results['walk_forward']['success_rate']:.1f}%")
+                else:
+                    st.metric("Walk-Forward Success", "N/A")
+            with col3:
+                is_sig = results['monte_carlo']['is_significant']
+                st.metric("Statistical Significance", "Yes ✅" if is_sig else "No ❌")
+            
+            st.markdown("---")
+            st.info("Click **Run Complete Validation** to run a new analysis with current settings.")
 
     st.markdown("---")
     st.markdown(
