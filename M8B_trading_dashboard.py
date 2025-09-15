@@ -4,7 +4,7 @@ Time Trends Dashboard (TTD)
 Automatically updates when any setting changes
 No optimization - direct analysis of historical data
 
-Version 1.2.2
+Version 1.2.3
 - Earnings E+1 handling: When "Exclude Earnings Days" is enabled, we now exclude
   BOTH the earnings date AND the following business day (E+1). FOMC exclusions
   remain unchanged (no +1).
@@ -708,14 +708,14 @@ def main():
             📊 Time Trends Dashboard (TTD)
             <span style='font-size:0.5em;color:#1E90FF;font-weight:400;'>by jb-trader</span>
             <span style='font-size:0.4em;color:#888;font-weight:400;margin-left:20px;'>
-                Version 1.2.2 | Source: M8B v1.37 | Data updated: {latest_data_date}
+                Version 1.2.3 | Source: M8B v1.37 | Data updated: {latest_data_date}
             </span>
         </h1>
         """, unsafe_allow_html=True)
         st.markdown(f"Analyzing {weeks_history} weeks of historical data | Live updates enabled")
 
         metrics_df = calculate_metrics_for_times(filtered_df, contracts)
-        add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings)
+        #add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings)
 
         active_weights = {k: v['weight'] for k, v in st.session_state.metric_weights.items() if v['enabled']}
         top_times_df = get_top_times_by_day(metrics_df, active_weights)
@@ -790,7 +790,20 @@ def main():
     # TAB 2: PERFORMANCE
     with tab2:
         st.subheader("📈 Historical Performance - Maybe This Trend Will Continue")
-
+        
+        # Add prominent disclaimer in an expander
+        with st.expander("⚠️ IMPORTANT: Hindsight Analysis - Read This First", expanded=False):
+            st.warning("""
+            **This graph shows hindsight performance** - it assumes you had perfect knowledge of which times would be best for the entire period from day one.
+            
+            **PURPOSE:** Validate that time patterns exist and understand their potential
+            
+            **HOW TO USE:** Compare this 'perfect' scenario with Forward Testing results to gauge realistic expectations
+            
+            **WARNING:** These results are NOT achievable in real trading - the Forward Testing tab shows what IS realistic
+            
+            **Remember:** Past performance does not guarantee future results
+            """)
         if not filtered_df.empty and not top_times_df.empty:
             c1, c2, c3, c4, c5 = st.columns([2, 2, 3, 1, 1])
             with c1:
@@ -888,8 +901,52 @@ def main():
             st.warning("Not enough data to display performance metrics")
 
     # TAB 3: FORWARD TESTING
+    # TAB 3: FORWARD TESTING
     with tab3:
         st.subheader("🔄 Forward Testing - Realistic Walk-Forward Analysis")
+        
+        # Add How-To guide in an expander
+        with st.expander("📚 How To Use Forward Testing", expanded=False):
+            st.info("""
+            **What is Forward Testing?**
+            Forward Testing simulates real trading by training on historical data, then trading on future unseen data - just like you would in real life. This eliminates hindsight bias.
+            
+            **How the Windows Work:**
+            
+            🔹 **Training Window (e.g., 6 weeks):**
+            - The system looks back X weeks to analyze which times performed best
+            - It calculates metrics for every day/time combination
+            - Selects the top-ranked times based on your chosen metrics
+            
+            🔹 **Trading Window (e.g., 1 week):**
+            - Uses ONLY the times selected from the training period
+            - Trades these times for the next Y weeks on "unseen" future data
+            - Records actual performance without any lookahead bias
+            
+            🔹 **Walk-Forward Process:**
+            - After each trading window, the system moves forward
+            - Retrains on the most recent data
+            - Selects potentially new "best times" 
+            - Continues trading with updated selections
+            
+            **Example Timeline:**
+                    
+            Train Week 1-6 → Trade Week 7
+                    
+            Train Week 2-7 → Trade Week 8
+                    
+            Train Week 3-8 → Trade Week 9
+                    
+            (And so on...)
+            
+            **Key Settings:**
+            - **Longer Training** = More stable patterns but slower to adapt
+            - **Shorter Training** = Faster adaptation but may overfit to noise
+            - **Rank Selection** = 1st rank is most aggressive, 3rd rank is more conservative
+            
+            **Why This Matters:**
+            The Performance tab shows what "could have been" with perfect knowledge. Forward Testing shows what's actually achievable when you have to discover patterns as you go - typically much lower returns but more realistic.
+            """)
 
         col1, col2, col3, col4 = st.columns([1.5, 1.5, 2, 2])
         with col1:
@@ -975,7 +1032,7 @@ def main():
                     c5.metric("Max Drawdown", f"${max_dd:,.0f}")
                     c6.metric("Total Trades", len(trades_df))
 
-                st.markdown("### 📍 Current Trading Times")
+                st.markdown("### 🔍 Current Trading Times")
                 most_recent_date = df_for_fwd['Date'].max()
 
                 training_start = most_recent_date - timedelta(weeks=training_weeks)
@@ -1017,7 +1074,7 @@ def main():
         export_col1, export_col2, export_col3 = st.columns([2, 3, 2])
         
         with export_col1:
-            export_button = st.button("🔍 Generate CSV Export", type="secondary", 
+            export_button = st.button("📝 Generate CSV Export", type="secondary", 
                                     help="Export all forward test trades with selected times for each window")
         
         if export_button:
@@ -1388,7 +1445,7 @@ def main():
                     for i, (day, time) in enumerate(best_times[:5]):
                         stability = stability_analyzer.analyze_time_stability(day, time)
                         if stability:
-                            trend_indicator = "↓" if stability['is_deteriorating'] else "↑" if abs(stability['trend_slope']) < 5 else "→"
+                            trend_indicator = "↓" if stability['is_deteriorating'] else "→" if abs(stability['trend_slope']) < 5 else "↑"
                             
                             stability_data.append({
                                 'Day': day,
