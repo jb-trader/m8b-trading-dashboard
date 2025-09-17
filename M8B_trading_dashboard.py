@@ -721,12 +721,51 @@ def main():
         top_times_df = get_top_times_by_day(metrics_df, active_weights)
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "🎯 Best Times", "📈 Performance", "🔄 Forward Testing", "📊 Analysis", "📋 All Times", "✅ Validation"
+        "🎯 Best Times", "📈 Performance", "🔄 Forward Testing", "📊 Heat Map", "📋 All Times", "✅ Validation"
     ])
 
     # TAB 1: BEST TIMES
     with tab1:
-        st.subheader("🎯 Top 3 Trading Times by Day")
+        # 📌 Add drop-down explanation above the subtitle
+        with st.expander("ℹ️ What do the Scores Mean?", expanded=False):
+            st.markdown("""
+            **Composite Score Explanation**
+
+            - **What is a Score?**  
+            A weighted composite of multiple metrics, each normalized to a 0–1 scale.
+
+            - **Metrics Included:**  
+            • 📊 Sortino Ratio – risk-adjusted returns  
+            • 💰 Average Profit – profit per trade  
+            • 🎯 Win Rate – % of winning trades  
+            • 📈 Profit Factor – ratio of total wins to total losses  
+
+            - **How It’s Calculated:**  
+            Each metric is scaled 0–1, multiplied by your chosen weight, then averaged.  
+            Formula (simplified):  
+            `Score = Σ(weight × normalized_metric) ÷ Σ(weights)`
+
+            - **Color Codes:**  
+            • 🟩 Green = Strong (≥ 0.70)  
+            • 🟨 Yellow = Moderate (0.50 – 0.69)  
+            • 🟥 Red = Weak (< 0.50)
+
+            - **Purpose:**  
+            Scores let you compare times on a consistent scale, based on the metrics you care about most.
+            """)
+
+        st.subheader("🎯 Top 3 Trading Times by Day Based on Prior Performance")
+        st.markdown("""
+                <div style='background-color: #FFFF00; padding: 10px; border-radius: 5px; margin: 10px 0 20px 0;'>
+                    <p style='color: #FF0000; font-weight: bold; margin: 0; font-size: 18px;'>
+                    ⚠️ DISCLAIMER: Historical performance data shown is for informational purposes only and does not guarantee future results. 
+                    Past patterns may not repeat. Trading involves substantial risk of loss including possible loss of principal. 
+                    The backtested results displayed assume perfect execution and do not account for slippage, fees, or market conditions. 
+                    This is not a recommendation or suggestion to trade, nor is it financial advice. 
+                    Always conduct your own analysis and consult with qualified professionals before making any trading decisions.
+                    </p>
+                </div>
+            """, unsafe_allow_html=True)
         if not top_times_df.empty:
             from zoneinfo import ZoneInfo
             et_tz = ZoneInfo("America/New_York")
@@ -901,14 +940,14 @@ def main():
             st.warning("Not enough data to display performance metrics")
 
     # TAB 3: FORWARD TESTING
-    # TAB 3: FORWARD TESTING
     with tab3:
-        st.subheader("🔄 Forward Testing - Realistic Walk-Forward Analysis")
+        st.subheader("🔄 Forward Testing - Realistic Walk-Forward Analysis - Based on Prior Performance")
         
         # Add How-To guide in an expander
         with st.expander("📚 How To Use Forward Testing", expanded=False):
             st.info("""
             **What is Forward Testing?**
+            Think of this as a 'rear view mirror, NOT a crytal ball'  !      
             Forward Testing simulates real trading by training on historical data, then trading on future unseen data - just like you would in real life. This eliminates hindsight bias.
             
             **How the Windows Work:**
@@ -1144,6 +1183,18 @@ def main():
                 times_for_display['composite_score'] = times_for_display['composite_score'].round(3)
                 times_for_display.columns = ['Day', 'Time', 'Score']
                 st.dataframe(times_for_display, width='stretch', hide_index=True)
+            # Add the prominent disclaimer with red text on yellow background
+        st.markdown("""
+            <div style='background-color: #FFFF00; padding: 10px; border-radius: 5px; margin: 10px 0 20px 0;'>
+                <p style='color: #FF0000; font-weight: bold; margin: 0; font-size: 18px;'>
+                ⚠️ DISCLAIMER: Historical performance data shown is for informational purposes only and does not guarantee future results. 
+                Past patterns may not repeat. Trading involves substantial risk of loss including possible loss of principal. 
+                The backtested results displayed assume perfect execution and do not account for slippage, fees, or market conditions. 
+                This is not a recommendation or suggestion to trade, nor is it financial advice. 
+                Always conduct your own analysis and consult with qualified professionals before making any trading decisions.
+                </p>
+            </div>
+        """, unsafe_allow_html=True)        
     # TAB 4: ANALYSIS
     with tab4:
         st.subheader("📊 Trading Analysis")
