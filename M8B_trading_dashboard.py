@@ -4,10 +4,9 @@ Time Trends Dashboard (TTD)
 Automatically updates when any setting changes
 No optimization - direct analysis of historical data
 
-Version 1.2.3
-- Earnings E+1 handling: When "Exclude Earnings Days" is enabled, we now exclude
-  BOTH the earnings date AND the following business day (E+1). FOMC exclusions
-  remain unchanged (no +1).
+Version 1.2.4
+- Added Predict Distance filter: filters trades where |Center - Predicted| <= 10
+- Center extraction for Butterfly trades from Trade column
 """
 
 import streamlit as st
@@ -22,6 +21,7 @@ import requests
 from io import BytesIO
 from pandas.tseries.offsets import BDay  # <-- for E+1 business day handling
 import config as cfg
+import re
 
 warnings.filterwarnings('ignore')
 
@@ -32,6 +32,29 @@ try:
 except ImportError:
     DATA_AVAILABLE = False
     print("Warning: spx_butterfly_optimizer not found. Using sample data.")
+
+
+# ============================================================================
+# CENTER EXTRACTION HELPER
+# ============================================================================
+
+def extract_butterfly_center(trade_str):
+    """
+    Extract the center strike from a Butterfly trade string.
+    Example: 'BUY +1 Butterfly SPX 100 02 Jan 25 5995/5945/5895 CALL @14.9 LMT'
+    Returns: 5945 (the middle strike)
+    """
+    try:
+        # Find the pattern with three numbers separated by /
+        pattern = r'(\d+)/(\d+)/(\d+)'
+        match = re.search(pattern, trade_str)
+        if match:
+            strikes = [int(match.group(1)), int(match.group(2)), int(match.group(3))]
+            # The center is the middle value
+            return strikes[1]
+    except Exception:
+        pass
+    return np.nan
 
 
 # ============================================================================
@@ -182,6 +205,12 @@ def load_historical_data(symbol: str, strategy: str, data_version: str):
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.normalize()
     df['Entry_Time'] = pd.to_datetime(df['Entry_Time'].astype(str), errors='coerce').dt.time
     df = df.dropna(subset=['Date', 'Entry_Time'])
+    
+    # Extract Center for Butterfly trades
+    if strategy == "Butterfly" and 'Trade' in df.columns:
+        df['Center'] = df['Trade'].apply(extract_butterfly_center)
+    else:
+        df['Center'] = np.nan
 
     latest_date = df['Date'].max()
     st.sidebar.success(f"✅ Data loaded from {source}")
@@ -192,11 +221,11 @@ def load_historical_data(symbol: str, strategy: str, data_version: str):
 
 
 # ============================================================================
-# FILTERING (WEEKS WINDOW) — now includes Earnings E+1 when exclude_earnings=True
+# FILTERING (WEEKS WINDOW) — now includes Predict Distance filter
 # ============================================================================
 
-def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=True):
-    """Filter for fixed weeks_back window and apply exclusions (E + E+1 if enabled)."""
+def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=True, predict_distance=False):
+    """Filter for fixed weeks_back window and apply exclusions (E + E+1 if enabled) and predict distance."""
     end_date = df['Date'].max()
     start_date = end_date - timedelta(weeks=weeks_back)
     filtered = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)].copy()
@@ -210,9 +239,19 @@ def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=Tru
     if exclude_fomc and len(fomc_idx) > 0:
         filtered = filtered[~filtered['Date'].isin(fomc_idx)]
     
-
     if exclude_earnings and len(earn_idx) > 0:
         filtered = filtered[~filtered['Date'].isin(earn_idx)]
+    
+    # Apply Predict Distance filter
+    if predict_distance and 'Center' in filtered.columns and 'Predicted' in filtered.columns:
+        # Only apply filter for rows where Center is not NaN (i.e., Butterfly trades)
+        mask_has_center = filtered['Center'].notna()
+        if mask_has_center.any():
+            distance = abs(filtered.loc[mask_has_center, 'Center'] - filtered.loc[mask_has_center, 'Predicted'])
+            valid_distance = distance <= 18
+            # Keep all non-butterfly trades and butterfly trades within distance
+            keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
+            filtered = filtered[keep_mask]
 
     cutoff = pd.to_datetime('15:30', format='%H:%M').time()
     filtered = filtered[filtered['Entry_Time'] <= cutoff]
@@ -223,7 +262,7 @@ def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=Tru
 # OPTIONAL: BACKFILL N DATES PER WEEKDAY (kept for future use; unchanged logic)
 # ============================================================================
 
-def select_recent_n_dates_per_weekday(df, n=20, exclude_fomc=True, exclude_earnings=True):
+def select_recent_n_dates_per_weekday(df, n=20, exclude_fomc=True, exclude_earnings=True, predict_distance=False):
     """Pick most recent N valid dates per weekday (applies E+1 if exclude_earnings)."""
     fomc_idx, earn_idx = build_exclusion_index(
         include_fomc=exclude_fomc,
@@ -238,6 +277,15 @@ def select_recent_n_dates_per_weekday(df, n=20, exclude_fomc=True, exclude_earni
         base = base[~base['Date'].isin(fomc_idx)]
     if exclude_earnings and len(earn_idx) > 0:
         base = base[~base['Date'].isin(earn_idx)]
+    
+    # Apply Predict Distance filter
+    if predict_distance and 'Center' in base.columns and 'Predicted' in base.columns:
+        mask_has_center = base['Center'].notna()
+        if mask_has_center.any():
+            distance = abs(base.loc[mask_has_center, 'Center'] - base.loc[mask_has_center, 'Predicted'])
+            valid_distance = distance <= 18
+            keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
+            base = base[keep_mask]
 
     days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
     keep_dates = []
@@ -300,12 +348,13 @@ def get_top_times_by_day(metrics_df, weights):
 
 
 # ============================================================================
-# OPTIMAL WEEKS (unchanged behavior)
+# OPTIMAL WEEKS (now includes predict_distance parameter)
 # ============================================================================
 
 @st.cache_data
 def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
-                       exclude_fomc=True, exclude_earnings=True, contracts=1):
+                       exclude_fomc=True, exclude_earnings=True, 
+                       predict_distance=False, contracts=1):
     if symbol == "SPX" and strategy == "Butterfly":
         return 20
     try:
@@ -314,7 +363,7 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
             return 30
         results = []
         for weeks in range(min_weeks, min(max_weeks + 1, 53)):
-            filtered = filter_data_by_weeks(df, weeks, exclude_fomc, exclude_earnings)
+            filtered = filter_data_by_weeks(df, weeks, exclude_fomc, exclude_earnings, predict_distance)
             if len(filtered) > 0:
                 avg_profit = filtered['Profit'].mean() * contracts
                 total_profit = filtered['Profit'].sum() * contracts
@@ -341,7 +390,7 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
 
 def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
                      active_weights, contracts, starting_balance,
-                     exclude_fomc=True, exclude_earnings=True):
+                     exclude_fomc=True, exclude_earnings=True, predict_distance=False):
     """Walk-forward simulation with consistent exclusions in train and trade windows."""
     df = df.sort_values('Date').copy()
 
@@ -374,6 +423,15 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
             training_data = training_data[~training_data['Date'].isin(fomc_idx)]
         if exclude_earnings and len(earn_idx) > 0:
             training_data = training_data[~training_data['Date'].isin(earn_idx)]
+        
+        # Apply Predict Distance filter to training data
+        if predict_distance and 'Center' in training_data.columns and 'Predicted' in training_data.columns:
+            mask_has_center = training_data['Center'].notna()
+            if mask_has_center.any():
+                distance = abs(training_data.loc[mask_has_center, 'Center'] - training_data.loc[mask_has_center, 'Predicted'])
+                valid_distance = distance <= 18
+                keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
+                training_data = training_data[keep_mask]
 
         if len(training_data) == 0:
             current_start = current_start + timedelta(weeks=trading_weeks)
@@ -404,9 +462,18 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
 
         if exclude_fomc and len(fomc_idx) > 0:
             trading_data = trading_data[~trading_data['Date'].isin(fomc_idx)]
-
         if exclude_earnings and len(earn_idx) > 0:
             trading_data = trading_data[~trading_data['Date'].isin(earn_idx)]
+        
+        # Apply Predict Distance filter to trading data
+        if predict_distance and 'Center' in trading_data.columns and 'Predicted' in trading_data.columns:
+            mask_has_center = trading_data['Center'].notna()
+            if mask_has_center.any():
+                distance = abs(trading_data.loc[mask_has_center, 'Center'] - trading_data.loc[mask_has_center, 'Predicted'])
+                valid_distance = distance <= 18
+                keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
+                trading_data = trading_data[keep_mask]
+        
         if day_filter != "All Days":
             trading_data = trading_data[trading_data['Day_of_week'] == day_filter]
 
@@ -437,7 +504,6 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
     trades_df = pd.DataFrame(trades_log) if trades_log else pd.DataFrame()
     retraining_df = pd.DataFrame(retraining_log) if retraining_log else pd.DataFrame()
     return equity_df, trades_df, retraining_df
-
 
 
 # ============================================================================
@@ -587,10 +653,30 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
+
+    # Initialize ALL session state variables FIRST, before any UI elements
+    if 'exclude_fomc' not in st.session_state:
+        st.session_state.exclude_fomc = True
+    if 'exclude_earnings' not in st.session_state:
+        st.session_state.exclude_earnings = True
+    if 'predict_distance' not in st.session_state:
+        st.session_state.predict_distance = False
+    if 'contracts' not in st.session_state:
+        st.session_state.contracts = 1
+    if 'starting_balance' not in st.session_state:
+        st.session_state.starting_balance = 10000
+    if 'metric_weights' not in st.session_state:
+        st.session_state.metric_weights = {
+            'sortino_ratio': {'enabled': False, 'weight': 30},
+            'avg_profit': {'enabled': True, 'weight': 12},
+            'win_rate': {'enabled': True, 'weight': 51},
+            'profit_factor': {'enabled': False, 'weight': 20}
+        }
+
     # Sidebar
     with st.sidebar:
         st.subheader("📊 Strategy")
-        symbol = st.selectbox("Symbol", ["SPX", "XSP", "RUT", "NDX"], key="symbol")
+        symbol = st.selectbox("Symbol", ["SPX", "XSP", "RUT"], key="symbol")
         strategy = st.selectbox("Strategy Type", ["Butterfly", "Iron Condor", "Vertical", "Sonar"], key="strategy")
 
         st.subheader("📅 Data Range")
@@ -603,6 +689,7 @@ def main():
                     symbol, strategy,
                     exclude_fomc=st.session_state.get('exclude_fomc', True),
                     exclude_earnings=st.session_state.get('exclude_earnings', True),
+                    predict_distance=st.session_state.get('predict_distance', False),
                     contracts=st.session_state.get('contracts', 1)
                 )
                 st.session_state.optimal_weeks = optimal_weeks
@@ -611,7 +698,7 @@ def main():
 
         if 'reset_to_optimal' not in st.session_state:
             st.session_state.reset_to_optimal = False
-
+            
         slider_value = st.session_state.optimal_weeks if st.session_state.reset_to_optimal \
             else st.session_state.get('weeks_history', st.session_state.optimal_weeks)
 
@@ -636,12 +723,12 @@ def main():
         st.caption(f"Analyzing {weeks_history} weeks of data")
 
         st.subheader("⚖️ Metric Weights")
-        if 'metric_weights' not in st.session_state:
-            st.session_state.metric_weights = {
-                'sortino_ratio': {'enabled': False, 'weight': 30},
-                'avg_profit': {'enabled': True, 'weight': 12},
-                'win_rate': {'enabled': True, 'weight': 51},
-                'profit_factor': {'enabled': False, 'weight': 20}
+        
+        st.session_state.metric_weights = {
+            'sortino_ratio': {'enabled': False, 'weight': 30},
+            'avg_profit': {'enabled': True, 'weight': 12},
+            'win_rate': {'enabled': True, 'weight': 51},
+            'profit_factor': {'enabled': False, 'weight': 20}
             }
         metrics_config = {
             'sortino_ratio': {'label': '📊 Sortino Ratio', 'desc': 'Risk-adjusted returns'},
@@ -676,11 +763,21 @@ def main():
         else:
             st.error("❌ No weights set (0%)")
 
-
-
         st.subheader("🔧 Data Filters")
-        exclude_fomc = st.checkbox("Exclude FOMC Days", value=True, key="exclude_fomc")
-        exclude_earnings = st.checkbox("Exclude Earnings Days (includes E+1)", value=True, key="exclude_earnings")
+        col1, col2 = st.columns(2)
+        with col1:
+            exclude_fomc = st.checkbox("Exclude FOMC Days", key="exclude_fomc")
+            exclude_earnings = st.checkbox("Exclude Earnings Days (includes E+1)", key="exclude_earnings")
+        with col2:
+            predict_distance = st.checkbox(
+                "Predict Distance", 
+                key="predict_distance",
+                help="Filter trades where |Center - Predicted| ≤ 18 (Butterfly only)"
+            )
+            if predict_distance and strategy == "Butterfly":
+                st.caption("📍 Active: |Center-Predicted| ≤ 18")
+            elif predict_distance and strategy != "Butterfly":
+                st.caption("⚠️ Only for Butterfly")
 
         st.subheader("💼 Trade Settings")
         contracts = st.number_input("Number of Contracts", 1, 100, value=1, key="contracts")
@@ -701,14 +798,21 @@ def main():
 
         latest_data_date = df['Date'].max().strftime('%m/%d/%Y')
 
-        filtered_df = filter_data_by_weeks(df, weeks_history, exclude_fomc, exclude_earnings)
+        filtered_df = filter_data_by_weeks(df, weeks_history, exclude_fomc, exclude_earnings, predict_distance)
+        
+        # Show filter statistics if Predict Distance is enabled for Butterfly
+        if predict_distance and strategy == "Butterfly":
+            total_trades = len(df[(df['Date'] >= df['Date'].max() - timedelta(weeks=weeks_history)) & 
+                                 (df['Date'] <= df['Date'].max())])
+            filtered_trades = len(filtered_df)
+            st.sidebar.caption(f"Predict Distance: {filtered_trades}/{total_trades} trades")
 
         st.markdown(f"""
         <h1 style='text-align:left;margin-bottom:0'>
             📊 Time Trends Dashboard (TTD)
             <span style='font-size:0.5em;color:#1E90FF;font-weight:400;'>by jb-trader</span>
             <span style='font-size:0.4em;color:#888;font-weight:400;margin-left:20px;'>
-                Version 1.2.3 | Source: M8B v1.37 | Data updated: {latest_data_date}
+                Version 1.2.4 | Source: M8B v1.37 | Data updated: {latest_data_date}
             </span>
         </h1>
         """, unsafe_allow_html=True)
@@ -735,12 +839,12 @@ def main():
             A weighted composite of multiple metrics, each normalized to a 0–1 scale.
 
             - **Metrics Included:**  
-            • 📊 Sortino Ratio – risk-adjusted returns  
-            • 💰 Average Profit – profit per trade  
-            • 🎯 Win Rate – % of winning trades  
-            • 📈 Profit Factor – ratio of total wins to total losses  
+            • 📊 Sortino Ratio — risk-adjusted returns  
+            • 💰 Average Profit — profit per trade  
+            • 🎯 Win Rate — % of winning trades  
+            • 📈 Profit Factor — ratio of total wins to total losses  
 
-            - **How It’s Calculated:**  
+            - **How It's Calculated:**  
             Each metric is scaled 0–1, multiplied by your chosen weight, then averaged.  
             Formula (simplified):  
             `Score = Σ(weight × normalized_metric) ÷ Σ(weights)`
@@ -844,7 +948,7 @@ def main():
             **Remember:** Past performance does not guarantee future results
             """)
         if not filtered_df.empty and not top_times_df.empty:
-            c1, c2, c3, c4, c5 = st.columns([2, 2, 3, 1, 1])
+            c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 1, 1, 1])
             with c1:
                 selected_rank = st.selectbox("Select Rank", options=[1, 2, 3],
                                              format_func=lambda x: f"{'1st' if x==1 else '2nd' if x==2 else '3rd'} Rank Times",
@@ -857,10 +961,13 @@ def main():
             with c4:
                 perf_exclude_fomc = st.checkbox("Exclude FOMC", value=exclude_fomc, key="perf_exclude_fomc")
             with c5:
-                perf_exclude_earnings = st.checkbox("Exclude Earnings (E+1)", value=exclude_earnings, key="perf_exclude_earnings")
+                perf_exclude_earnings = st.checkbox("Exclude Earnings", value=exclude_earnings, key="perf_exclude_earnings")
+            with c6:
+                perf_predict_distance = st.checkbox("Predict Distance", value=predict_distance, key="perf_predict_distance")
 
-            perf_filtered_df = filter_data_by_weeks(df, perf_weeks, perf_exclude_fomc, perf_exclude_earnings)
-            if perf_weeks != weeks_history or perf_exclude_fomc != exclude_fomc or perf_exclude_earnings != exclude_earnings:
+            perf_filtered_df = filter_data_by_weeks(df, perf_weeks, perf_exclude_fomc, perf_exclude_earnings, perf_predict_distance)
+            if (perf_weeks != weeks_history or perf_exclude_fomc != exclude_fomc or 
+                perf_exclude_earnings != exclude_earnings or perf_predict_distance != predict_distance):
                 perf_metrics_df = calculate_metrics_for_times(perf_filtered_df, contracts)
                 perf_top_times_df = get_top_times_by_day(perf_metrics_df, active_weights)
             else:
@@ -918,7 +1025,17 @@ def main():
                 c3.metric("Best Trade", f"${best_trade:,.0f}")
                 c4.metric("Worst Trade", f"${worst_trade:,.0f}")
 
-                with st.expander(f"📅 Trading Times Used (Rank {selected_rank}, {selected_day})"):
+                # Style all expanders
+                st.markdown("""
+                    <style>
+                    div[data-testid="stExpander"] details summary p {
+                        font-size: 1.5rem !important;
+                        font-weight: 700 !important;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+
+                with st.expander(f"📅 Trading Times Used (Rank {selected_rank}, {selected_day})", expanded=True):
                     times_display = rank_times.copy()
                     if selected_day != "All Days":
                         times_display = times_display[times_display['Day_of_week'] == selected_day]
@@ -929,11 +1046,15 @@ def main():
                     for day in days_order:
                         day_time = times_display[times_display['Day_of_week'] == day]
                         if not day_time.empty:
-                            times_by_day.append(f"**{day}**: {day_time['Entry_Time'].iloc[0]}")
+                            times_by_day.append(f"<strong>{day}</strong>: {day_time['Entry_Time'].iloc[0]}")
+                    
                     if times_by_day:
-                        st.markdown(" | ".join(times_by_day))
+                        # Use HTML for custom font size
+                        html_content = ' | '.join(times_by_day)
+                        st.markdown(f'<p style="font-size: 2rem;">{html_content}</p>', unsafe_allow_html=True)
                     else:
-                        st.markdown(f"**{selected_day}**: {times_display['Entry_Time'].iloc[0] if not times_display.empty else 'N/A'}")
+                        # Use HTML for custom font size
+                        st.markdown(f'<p style="font-size: 2rem;"><strong>{selected_day}</strong>: {times_display["Entry_Time"].iloc[0] if not times_display.empty else "N/A"}</p>', unsafe_allow_html=True)
             else:
                 st.warning(f"No trades found for Rank {selected_rank} times on {selected_day}")
         else:
@@ -998,13 +1119,15 @@ def main():
             days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
             fwd_day = st.selectbox("Day of Week", ["All Days"] + days_order, key="fwd_day_selector")
 
-        col1, col2, col3 = st.columns([3, 1.5, 1.5])
+        col1, col2, col3, col4 = st.columns([2.5, 1.5, 1.5, 1.5])
         with col1:
             only_after_aug_upgrade = st.checkbox("Only After Aug 2024 1.37 M8B upgrade", value=False, key="fwd_only_after_aug_2024")
         with col2:
             fwd_exclude_fomc = st.checkbox("Exclude FOMC", value=exclude_fomc, key="fwd_exclude_fomc")
         with col3:
             fwd_exclude_earnings = st.checkbox("Exclude Earnings (E+1)", value=False, key="fwd_exclude_earnings")
+        with col4:
+            fwd_predict_distance = st.checkbox("Predict Distance", value=False, key="fwd_predict_distance")
 
         with st.spinner("Running forward test simulation..."):
             df_for_fwd = df.copy()
@@ -1015,7 +1138,7 @@ def main():
             equity_df, trades_df, retraining_df = run_forward_test(
                 df_for_fwd, training_weeks, trading_weeks, fwd_rank, fwd_day,
                 active_weights, contracts, starting_balance,
-                fwd_exclude_fomc, fwd_exclude_earnings
+                fwd_exclude_fomc, fwd_exclude_earnings, fwd_predict_distance
             )
 
             if not equity_df.empty:
@@ -1071,7 +1194,7 @@ def main():
                     c5.metric("Max Drawdown", f"${max_dd:,.0f}")
                     c6.metric("Total Trades", len(trades_df))
 
-                st.markdown("### 🔍 Current Trading Times")
+                st.markdown("### 📍 Current Trading Times")
                 most_recent_date = df_for_fwd['Date'].max()
 
                 training_start = most_recent_date - timedelta(weeks=training_weeks)
@@ -1081,6 +1204,16 @@ def main():
                     recent_training = recent_training[~recent_training['Date'].isin(fomc_idx)]
                 if fwd_exclude_earnings and len(earn_idx) > 0:
                     recent_training = recent_training[~recent_training['Date'].isin(earn_idx)]
+                
+                # Apply Predict Distance filter
+                if fwd_predict_distance and 'Center' in recent_training.columns and 'Predicted' in recent_training.columns:
+                    mask_has_center = recent_training['Center'].notna()
+                    if mask_has_center.any():
+                        distance = abs(recent_training.loc[mask_has_center, 'Center'] - recent_training.loc[mask_has_center, 'Predicted'])
+                        valid_distance = distance <= 18
+                        keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
+                        recent_training = recent_training[keep_mask]
+                
                 recent_metrics = calculate_metrics_for_times(recent_training, contracts)
                 recent_top_times = get_top_times_by_day(recent_metrics, active_weights)
                 current_times = recent_top_times[recent_top_times['rank'] == fwd_rank].copy()
@@ -1125,7 +1258,7 @@ def main():
                 equity_df_export, trades_df_export, retraining_df_export = run_forward_test(
                     df_for_export, training_weeks, trading_weeks, fwd_rank, fwd_day,
                     active_weights, contracts, starting_balance,
-                    fwd_exclude_fomc, fwd_exclude_earnings
+                    fwd_exclude_fomc, fwd_exclude_earnings, fwd_predict_distance
                 )
                 
                 if not trades_df_export.empty:
