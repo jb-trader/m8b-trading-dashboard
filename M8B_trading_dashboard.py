@@ -5,7 +5,7 @@ Automatically updates when any setting changes
 No optimization - direct analysis of historical data
 
 Version 1.2.4
-- Added Predict Distance filter: filters trades where |Center - Predicted| <= 10
+- Added Predict Distance filter: filters trades where |Center - Predicted| <= x
 - Center extraction for Butterfly trades from Trade column
 """
 
@@ -676,7 +676,7 @@ def main():
     # Sidebar
     with st.sidebar:
         st.subheader("📊 Strategy")
-        symbol = st.selectbox("Symbol", ["SPX", "XSP", "RUT"], key="symbol")
+        symbol = st.selectbox("Symbol", ["SPX", "XSP", "RUT", "NDX"], key="symbol")
         strategy = st.selectbox("Strategy Type", ["Butterfly", "Iron Condor", "Vertical", "Sonar"], key="strategy")
 
         st.subheader("📅 Data Range")
@@ -725,9 +725,9 @@ def main():
         st.subheader("⚖️ Metric Weights")
         
         st.session_state.metric_weights = {
-            'sortino_ratio': {'enabled': False, 'weight': 30},
+            'sortino_ratio': {'enabled': True, 'weight': 30},
             'avg_profit': {'enabled': True, 'weight': 12},
-            'win_rate': {'enabled': True, 'weight': 51},
+            'win_rate': {'enabled': False, 'weight': 51},
             'profit_factor': {'enabled': False, 'weight': 20}
             }
         metrics_config = {
@@ -772,10 +772,10 @@ def main():
             predict_distance = st.checkbox(
                 "Predict Distance", 
                 key="predict_distance",
-                help="Filter trades where |Center - Predicted| ≤ 18 (Butterfly only)"
+                help="Exclude trades where |Center - Predicted| > 18 (Butterfly only)"
             )
             if predict_distance and strategy == "Butterfly":
-                st.caption("📍 Active: |Center-Predicted| ≤ 18")
+                st.caption("📍 Active: include |Center-Predicted| ≤ 18")
             elif predict_distance and strategy != "Butterfly":
                 st.caption("⚠️ Only for Butterfly")
 
@@ -831,7 +831,7 @@ def main():
     # TAB 1: BEST TIMES
     with tab1:
         # 📌 Add drop-down explanation above the subtitle
-        with st.expander("ℹ️ What do the Scores Mean?", expanded=False):
+        with st.expander("ℹ️ What do the Scores & Metrics Mean?", expanded=False):
             st.markdown("""
             **Composite Score Explanation**
 
@@ -1110,7 +1110,7 @@ def main():
 
         col1, col2, col3, col4 = st.columns([1.5, 1.5, 2, 2])
         with col1:
-            training_weeks = st.slider("Training Window", 4, 26, value=6, key="fwd_training_weeks")
+            training_weeks = st.slider("Training Window", 1, 50, value=40, key="fwd_training_weeks")
         with col2:
             trading_weeks = st.slider("Trading Window", 1, 8, value=1, key="fwd_trading_weeks")
         with col3:
@@ -1121,7 +1121,7 @@ def main():
 
         col1, col2, col3, col4 = st.columns([2.5, 1.5, 1.5, 1.5])
         with col1:
-            only_after_aug_upgrade = st.checkbox("Only After Aug 2024 1.37 M8B upgrade", value=False, key="fwd_only_after_aug_2024")
+            only_after_aug_upgrade = st.checkbox("Only After Aug 2024 1.37 M8B upgrade", value=True, key="fwd_only_after_aug_2024")
         with col2:
             fwd_exclude_fomc = st.checkbox("Exclude FOMC", value=exclude_fomc, key="fwd_exclude_fomc")
         with col3:
