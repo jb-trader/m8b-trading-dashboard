@@ -1003,7 +1003,7 @@ def main():
                     height=700,
                     hovermode='x unified'
                 )
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, use_container_width=True)
 
                 c1, c2, c3, c4 = st.columns(4)
                 total_trades = len(rank_filtered_df)
@@ -1175,7 +1175,7 @@ def main():
                     xaxis_title="Date", yaxis_title="Account Value ($)", yaxis_tickformat="$,.0f",
                     height=600, hovermode="x unified"
                 )
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, use_container_width=True)
 
                 if not trades_df.empty:
                     st.subheader("Trade Analysis")
@@ -1351,7 +1351,7 @@ def main():
                     color_continuous_scale="RdYlGn", aspect="auto"
                 )
                 fig.update_layout(height=500)
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No heatmap data available with the current filters.")
         else:
@@ -1610,7 +1610,7 @@ def main():
                         height=400
                     )
                     
-                    st.plotly_chart(fig, width='stretch')
+                    st.plotly_chart(fig, use_container_width=True)
                 
                 # ============================================================
                 # 3. PATTERN STABILITY ANALYSIS
@@ -1733,7 +1733,7 @@ def main():
                             }
                         ))
                         fig.update_layout(height=250)
-                        st.plotly_chart(fig, width='stretch')
+                        st.plotly_chart(fig, use_container_width=True)
                     
                     with col2:
                         st.markdown("##### Score Components")
