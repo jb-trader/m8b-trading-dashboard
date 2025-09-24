@@ -224,7 +224,8 @@ def load_historical_data(symbol: str, strategy: str, data_version: str):
 # FILTERING (WEEKS WINDOW) — now includes Predict Distance filter
 # ============================================================================
 
-def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=True, predict_distance=False):
+def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=True, 
+                         predict_distance=False, predict_distance_value=18):
     """Filter for fixed weeks_back window and apply exclusions (E + E+1 if enabled) and predict distance."""
     end_date = df['Date'].max()
     start_date = end_date - timedelta(weeks=weeks_back)
@@ -242,13 +243,13 @@ def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=Tru
     if exclude_earnings and len(earn_idx) > 0:
         filtered = filtered[~filtered['Date'].isin(earn_idx)]
     
-    # Apply Predict Distance filter
+    # Apply Predict Distance filter with user-defined value
     if predict_distance and 'Center' in filtered.columns and 'Predicted' in filtered.columns:
         # Only apply filter for rows where Center is not NaN (i.e., Butterfly trades)
         mask_has_center = filtered['Center'].notna()
         if mask_has_center.any():
             distance = abs(filtered.loc[mask_has_center, 'Center'] - filtered.loc[mask_has_center, 'Predicted'])
-            valid_distance = distance <= 18
+            valid_distance = distance <= predict_distance_value  # Use the parameter value
             # Keep all non-butterfly trades and butterfly trades within distance
             keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
             filtered = filtered[keep_mask]
@@ -261,8 +262,8 @@ def filter_data_by_weeks(df, weeks_back, exclude_fomc=True, exclude_earnings=Tru
 # ============================================================================
 # OPTIONAL: BACKFILL N DATES PER WEEKDAY (kept for future use; unchanged logic)
 # ============================================================================
-
-def select_recent_n_dates_per_weekday(df, n=20, exclude_fomc=True, exclude_earnings=True, predict_distance=False):
+def select_recent_n_dates_per_weekday(df, n=20, exclude_fomc=True, exclude_earnings=True, 
+                                      predict_distance=False, predict_distance_value=18):
     """Pick most recent N valid dates per weekday (applies E+1 if exclude_earnings)."""
     fomc_idx, earn_idx = build_exclusion_index(
         include_fomc=exclude_fomc,
@@ -278,12 +279,12 @@ def select_recent_n_dates_per_weekday(df, n=20, exclude_fomc=True, exclude_earni
     if exclude_earnings and len(earn_idx) > 0:
         base = base[~base['Date'].isin(earn_idx)]
     
-    # Apply Predict Distance filter
+    # Apply Predict Distance filter with user-defined value
     if predict_distance and 'Center' in base.columns and 'Predicted' in base.columns:
         mask_has_center = base['Center'].notna()
         if mask_has_center.any():
             distance = abs(base.loc[mask_has_center, 'Center'] - base.loc[mask_has_center, 'Predicted'])
-            valid_distance = distance <= 18
+            valid_distance = distance <= predict_distance_value  # Use the parameter value
             keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
             base = base[keep_mask]
 
@@ -354,7 +355,7 @@ def get_top_times_by_day(metrics_df, weights):
 @st.cache_data
 def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
                        exclude_fomc=True, exclude_earnings=True, 
-                       predict_distance=False, contracts=1):
+                       predict_distance=False, predict_distance_value=18, contracts=1):
     if symbol == "SPX" and strategy == "Butterfly":
         return 20
     try:
@@ -363,7 +364,8 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
             return 30
         results = []
         for weeks in range(min_weeks, min(max_weeks + 1, 53)):
-            filtered = filter_data_by_weeks(df, weeks, exclude_fomc, exclude_earnings, predict_distance)
+            filtered = filter_data_by_weeks(df, weeks, exclude_fomc, exclude_earnings, 
+                                           predict_distance, predict_distance_value)  # Pass the value
             if len(filtered) > 0:
                 avg_profit = filtered['Profit'].mean() * contracts
                 total_profit = filtered['Profit'].sum() * contracts
@@ -390,7 +392,8 @@ def find_optimal_weeks(symbol, strategy, min_weeks=4, max_weeks=52,
 
 def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
                      active_weights, contracts, starting_balance,
-                     exclude_fomc=True, exclude_earnings=True, predict_distance=False):
+                     exclude_fomc=True, exclude_earnings=True, predict_distance=False,
+                     predict_distance_value=18):
     """Walk-forward simulation with consistent exclusions in train and trade windows."""
     df = df.sort_values('Date').copy()
 
@@ -426,12 +429,12 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
         
         # Apply Predict Distance filter to training data
         if predict_distance and 'Center' in training_data.columns and 'Predicted' in training_data.columns:
-            mask_has_center = training_data['Center'].notna()
-            if mask_has_center.any():
-                distance = abs(training_data.loc[mask_has_center, 'Center'] - training_data.loc[mask_has_center, 'Predicted'])
-                valid_distance = distance <= 18
-                keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
-                training_data = training_data[keep_mask]
+                mask_has_center = training_data['Center'].notna()
+                if mask_has_center.any():
+                    distance = abs(training_data.loc[mask_has_center, 'Center'] - training_data.loc[mask_has_center, 'Predicted'])
+                    valid_distance = distance <= predict_distance_value  # Use the parameter value
+                    keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
+                    training_data = training_data[keep_mask]
 
         if len(training_data) == 0:
             current_start = current_start + timedelta(weeks=trading_weeks)
@@ -470,7 +473,7 @@ def run_forward_test(df, training_weeks, trading_weeks, rank, day_filter,
             mask_has_center = trading_data['Center'].notna()
             if mask_has_center.any():
                 distance = abs(trading_data.loc[mask_has_center, 'Center'] - trading_data.loc[mask_has_center, 'Predicted'])
-                valid_distance = distance <= 18
+                valid_distance = distance <= predict_distance_value  # Use the parameter value
                 keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
                 trading_data = trading_data[keep_mask]
         
@@ -661,6 +664,8 @@ def main():
         st.session_state.exclude_earnings = True
     if 'predict_distance' not in st.session_state:
         st.session_state.predict_distance = False
+    if 'predict_distance_value' not in st.session_state:
+        st.session_state.predict_distance_value = 18  # Add this new state variable
     if 'contracts' not in st.session_state:
         st.session_state.contracts = 1
     if 'starting_balance' not in st.session_state:
@@ -678,23 +683,29 @@ def main():
         st.subheader("📊 Strategy")
         symbol = st.selectbox("Symbol", ["SPX", "XSP", "RUT", "NDX"], key="symbol")
         strategy = st.selectbox("Strategy Type", ["Butterfly", "Iron Condor", "Vertical", "Sonar"], key="strategy")
-
         st.subheader("📅 Data Range")
 
+        # Add predict_distance_value to the cache key check
         if 'optimal_weeks' not in st.session_state or \
            st.session_state.get('last_symbol') != symbol or \
-           st.session_state.get('last_strategy') != strategy:
+           st.session_state.get('last_strategy') != strategy or \
+           st.session_state.get('last_predict_distance') != st.session_state.get('predict_distance', False) or \
+           st.session_state.get('last_predict_distance_value') != st.session_state.get('predict_distance_value', 18):
             with st.spinner("Finding optimal period..."):
                 optimal_weeks = find_optimal_weeks(
                     symbol, strategy,
                     exclude_fomc=st.session_state.get('exclude_fomc', True),
                     exclude_earnings=st.session_state.get('exclude_earnings', True),
                     predict_distance=st.session_state.get('predict_distance', False),
+                    predict_distance_value=st.session_state.get('predict_distance_value', 18),
                     contracts=st.session_state.get('contracts', 1)
                 )
                 st.session_state.optimal_weeks = optimal_weeks
                 st.session_state.last_symbol = symbol
                 st.session_state.last_strategy = strategy
+                st.session_state.last_predict_distance = st.session_state.get('predict_distance', False)
+                st.session_state.last_predict_distance_value = st.session_state.get('predict_distance_value', 18)
+   
 
         if 'reset_to_optimal' not in st.session_state:
             st.session_state.reset_to_optimal = False
@@ -772,12 +783,36 @@ def main():
             predict_distance = st.checkbox(
                 "Predict Distance", 
                 key="predict_distance",
-                help="Exclude trades where |Center - Predicted| > 18 (Butterfly only)"
+                help="Exclude trades where |Center - Predicted| > threshold (Butterfly only)"
             )
             if predict_distance and strategy == "Butterfly":
-                st.caption("📍 Active: include |Center-Predicted| ≤ 18")
+                # Store the old value to detect changes
+                old_value = st.session_state.get('last_predict_distance_value_used', 18)
+                
+                predict_distance_value = st.number_input(
+                    "Distance Threshold",
+                    min_value=1,
+                    max_value=100,
+                    value=st.session_state.predict_distance_value,
+                    step=1,
+                    key="predict_distance_value",
+                    help="Include trades where |Center - Predicted| ≤ this value"
+                )
+                
+                # If value changed, clear caches and force rerun
+                if old_value != predict_distance_value:
+                    st.session_state.last_predict_distance_value_used = predict_distance_value
+                    st.session_state.pop("optimal_weeks", None)
+                    st.cache_data.clear()
+                    st.rerun()  # Force the app to rerun with new value
+                
+                st.caption(f"🔍 Active: |Center-Predicted| ≤ {predict_distance_value}")
             elif predict_distance and strategy != "Butterfly":
                 st.caption("⚠️ Only for Butterfly")
+                predict_distance_value = st.session_state.predict_distance_value
+            else:
+                predict_distance_value = st.session_state.predict_distance_value
+        
 
         st.subheader("💼 Trade Settings")
         contracts = st.number_input("Number of Contracts", 1, 100, value=1, key="contracts")
@@ -790,6 +825,7 @@ def main():
             st.rerun()
 
     # MAIN CONTENT
+    # MAIN CONTENT
     with st.spinner("Loading data..."):
         df = load_historical_data(symbol, strategy, data_version=cfg.get_data_version())
         if df.empty:
@@ -798,14 +834,18 @@ def main():
 
         latest_data_date = df['Date'].max().strftime('%m/%d/%Y')
 
-        filtered_df = filter_data_by_weeks(df, weeks_history, exclude_fomc, exclude_earnings, predict_distance)
+        # Make sure to use the current predict_distance_value from session state
+        current_predict_distance_value = st.session_state.get('predict_distance_value', 18)
+        
+        filtered_df = filter_data_by_weeks(df, weeks_history, exclude_fomc, exclude_earnings, 
+                                          predict_distance, current_predict_distance_value)
         
         # Show filter statistics if Predict Distance is enabled for Butterfly
         if predict_distance and strategy == "Butterfly":
             total_trades = len(df[(df['Date'] >= df['Date'].max() - timedelta(weeks=weeks_history)) & 
                                  (df['Date'] <= df['Date'].max())])
             filtered_trades = len(filtered_df)
-            st.sidebar.caption(f"Predict Distance: {filtered_trades}/{total_trades} trades")
+            st.sidebar.caption(f"Predict Distance: {filtered_trades}/{total_trades} trades (≤ {current_predict_distance_value})")
 
         st.markdown(f"""
         <h1 style='text-align:left;margin-bottom:0'>
@@ -818,9 +858,10 @@ def main():
         """, unsafe_allow_html=True)
         st.markdown(f"Analyzing {weeks_history} weeks of historical data | Live updates enabled")
 
+        # Force recalculation of metrics when predict_distance_value changes
+        cache_key = f"{weeks_history}_{exclude_fomc}_{exclude_earnings}_{predict_distance}_{current_predict_distance_value}_{contracts}"
+        
         metrics_df = calculate_metrics_for_times(filtered_df, contracts)
-        #add_debug_section(df, weeks_history, exclude_fomc, exclude_earnings)
-
         active_weights = {k: v['weight'] for k, v in st.session_state.metric_weights.items() if v['enabled']}
         top_times_df = get_top_times_by_day(metrics_df, active_weights)
 
@@ -930,6 +971,7 @@ def main():
         else:
             st.warning("Not enough data to display top times")
 
+    
     # TAB 2: PERFORMANCE
     with tab2:
         st.subheader("📈 Historical Performance - Maybe This Trend Will Continue")
@@ -947,8 +989,10 @@ def main():
             
             **Remember:** Past performance does not guarantee future results
             """)
+        
         if not filtered_df.empty and not top_times_df.empty:
-            c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 1, 1, 1])
+            # Updated column layout to accommodate the new input field
+            c1, c2, c3 = st.columns([2, 2, 2])
             with c1:
                 selected_rank = st.selectbox("Select Rank", options=[1, 2, 3],
                                              format_func=lambda x: f"{'1st' if x==1 else '2nd' if x==2 else '3rd'} Rank Times",
@@ -958,22 +1002,65 @@ def main():
                 selected_day = st.selectbox("Day of Week", options=["All Days"] + days_order, key="perf_day_selector")
             with c3:
                 perf_weeks = st.slider("Date Range (weeks)", 4, 52, value=weeks_history, key="perf_weeks_slider")
+            
+            # Second row of controls
+            c4, c5, c6 = st.columns([2, 2, 2])
             with c4:
                 perf_exclude_fomc = st.checkbox("Exclude FOMC", value=exclude_fomc, key="perf_exclude_fomc")
             with c5:
                 perf_exclude_earnings = st.checkbox("Exclude Earnings", value=exclude_earnings, key="perf_exclude_earnings")
             with c6:
                 perf_predict_distance = st.checkbox("Predict Distance", value=predict_distance, key="perf_predict_distance")
+                
+                # Add the input field for predict distance value when checkbox is checked
+                if perf_predict_distance and strategy == "Butterfly":
+                    perf_predict_distance_value = st.number_input(
+                        "Distance Threshold",
+                        min_value=1,
+                        max_value=100,
+                        value=st.session_state.get('predict_distance_value', 18),
+                        step=1,
+                        key="perf_predict_distance_value",
+                        help="Include trades where |Center - Predicted| ≤ this value"
+                    )
+                else:
+                    # Use the default or sidebar value if not Butterfly or not checked
+                    perf_predict_distance_value = st.session_state.get('predict_distance_value', 18)
 
-            perf_filtered_df = filter_data_by_weeks(df, perf_weeks, perf_exclude_fomc, perf_exclude_earnings, perf_predict_distance)
-            if (perf_weeks != weeks_history or perf_exclude_fomc != exclude_fomc or 
-                perf_exclude_earnings != exclude_earnings or perf_predict_distance != predict_distance):
+            # Debug: Track initial count
+            initial_count = len(df[(df['Date'] >= df['Date'].max() - timedelta(weeks=perf_weeks)) & 
+                                  (df['Date'] <= df['Date'].max())])
+            
+            # Filter the data with all parameters
+            perf_filtered_df = filter_data_by_weeks(df, perf_weeks, perf_exclude_fomc, perf_exclude_earnings, 
+                                                    perf_predict_distance, perf_predict_distance_value)
+            
+            # Debug: Show filtering results
+            if perf_predict_distance and strategy == "Butterfly":
+                st.caption(f"📊 Data: {len(perf_filtered_df)}/{initial_count} trades after filters (Predict Distance ≤ {perf_predict_distance_value})")
+            else:
+                st.caption(f"📊 Data: {len(perf_filtered_df)}/{initial_count} trades after filters")
+            
+            # Check if we need to recalculate metrics
+            # Also check if perf_predict_distance_value has changed
+            recalculate = False
+            if (perf_weeks != weeks_history or 
+                perf_exclude_fomc != exclude_fomc or 
+                perf_exclude_earnings != exclude_earnings or 
+                perf_predict_distance != predict_distance):
+                recalculate = True
+            
+            # Also recalculate if predict distance is on and value changed
+            if perf_predict_distance and strategy == "Butterfly":
+                if perf_predict_distance_value != st.session_state.get('predict_distance_value', 18):
+                    recalculate = True
+            
+            if recalculate:
                 perf_metrics_df = calculate_metrics_for_times(perf_filtered_df, contracts)
                 perf_top_times_df = get_top_times_by_day(perf_metrics_df, active_weights)
             else:
                 perf_top_times_df = top_times_df
-                perf_filtered_df = filtered_df
-
+            
             rank_times = perf_top_times_df[perf_top_times_df['rank'] == selected_rank][['Day_of_week', 'Entry_Time']]
             if selected_day != "All Days":
                 rank_times = rank_times[rank_times['Day_of_week'] == selected_day]
@@ -1041,6 +1128,19 @@ def main():
                         times_display = times_display[times_display['Day_of_week'] == selected_day]
                     times_display['Entry_Time'] = times_display['Entry_Time'].apply(lambda x: x.strftime('%H:%M'))
                     times_display = times_display.sort_values(['Day_of_week', 'Entry_Time'])
+                    
+                    # Show the top times with their scores from perf_top_times_df
+                    st.write("**Selected Times and Scores:**")
+                    for _, row in times_display.iterrows():
+                        # Find the score for this time from perf_top_times_df
+                        matching_score = perf_top_times_df[
+                            (perf_top_times_df['Day_of_week'] == row['Day_of_week']) & 
+                            (perf_top_times_df['Entry_Time'].astype(str) == str(row['Entry_Time']))
+                        ]
+                        if not matching_score.empty:
+                            score = matching_score.iloc[0]['composite_score']
+                            st.write(f"**{row['Day_of_week']}** {row['Entry_Time']} - Score: {score:.3f}")
+                    
                     days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
                     times_by_day = []
                     for day in days_order:
@@ -1059,7 +1159,6 @@ def main():
                 st.warning(f"No trades found for Rank {selected_rank} times on {selected_day}")
         else:
             st.warning("Not enough data to display performance metrics")
-
     # TAB 3: FORWARD TESTING
     with tab3:
         st.subheader("🔄 Forward Testing - Realistic Walk-Forward Analysis - Based on Prior Performance")
@@ -1110,7 +1209,7 @@ def main():
 
         col1, col2, col3, col4 = st.columns([1.5, 1.5, 2, 2])
         with col1:
-            training_weeks = st.slider("Training Window", 1, 50, value=40, key="fwd_training_weeks")
+            training_weeks = st.slider("Training Window", 1, 50, value=20, key="fwd_training_weeks")
         with col2:
             trading_weeks = st.slider("Trading Window", 1, 8, value=1, key="fwd_trading_weeks")
         with col3:
@@ -1128,18 +1227,26 @@ def main():
             fwd_exclude_earnings = st.checkbox("Exclude Earnings (E+1)", value=False, key="fwd_exclude_earnings")
         with col4:
             fwd_predict_distance = st.checkbox("Predict Distance", value=False, key="fwd_predict_distance")
+            if fwd_predict_distance and strategy == "Butterfly":
+                fwd_predict_distance_value = st.number_input(
+                    "Distance", min_value=1, max_value=100, value=18, step=1,
+                    key="fwd_predict_distance_value"
+                )
+            else:
+                fwd_predict_distance_value = 18
 
         with st.spinner("Running forward test simulation..."):
             df_for_fwd = df.copy()
             if only_after_aug_upgrade:
                 cutoff = pd.Timestamp("2024-08-01")
                 df_for_fwd = df_for_fwd[df_for_fwd["Date"] >= cutoff]
-
             equity_df, trades_df, retraining_df = run_forward_test(
                 df_for_fwd, training_weeks, trading_weeks, fwd_rank, fwd_day,
                 active_weights, contracts, starting_balance,
-                fwd_exclude_fomc, fwd_exclude_earnings, fwd_predict_distance
-            )
+                fwd_exclude_fomc, fwd_exclude_earnings, fwd_predict_distance,
+                fwd_predict_distance_value  # Pass the value
+)
+
 
             if not equity_df.empty:
                 # Hindsight comparison uses same E+1 rule for earnings
@@ -1200,25 +1307,37 @@ def main():
                 training_start = most_recent_date - timedelta(weeks=training_weeks)
                 recent_training = df_for_fwd[(df_for_fwd["Date"] >= training_start) & (df_for_fwd["Date"] <= most_recent_date)].copy()
 
+                # Debug: Show count before any filtering
+                initial_count = len(recent_training)
+                
                 if fwd_exclude_fomc and len(fomc_idx) > 0:
                     recent_training = recent_training[~recent_training['Date'].isin(fomc_idx)]
                 if fwd_exclude_earnings and len(earn_idx) > 0:
                     recent_training = recent_training[~recent_training['Date'].isin(earn_idx)]
                 
-                # Apply Predict Distance filter
+                # Apply Predict Distance filter with proper debugging
                 if fwd_predict_distance and 'Center' in recent_training.columns and 'Predicted' in recent_training.columns:
+                    before_distance_filter = len(recent_training)
                     mask_has_center = recent_training['Center'].notna()
                     if mask_has_center.any():
                         distance = abs(recent_training.loc[mask_has_center, 'Center'] - recent_training.loc[mask_has_center, 'Predicted'])
-                        valid_distance = distance <= 18
+                        valid_distance = distance <= fwd_predict_distance_value
+                        # Keep all non-butterfly trades and butterfly trades within distance
                         keep_mask = ~mask_has_center | (mask_has_center & valid_distance)
                         recent_training = recent_training[keep_mask]
+                    after_distance_filter = len(recent_training)
+                    
+                    # Add debug info
+                    st.caption(f"📊 Training data: {after_distance_filter}/{before_distance_filter} trades after Predict Distance filter (threshold ≤ {fwd_predict_distance_value})")
+                else:
+                    st.caption(f"📊 Training data: {len(recent_training)}/{initial_count} trades after exclusions")
                 
                 recent_metrics = calculate_metrics_for_times(recent_training, contracts)
                 recent_top_times = get_top_times_by_day(recent_metrics, active_weights)
                 current_times = recent_top_times[recent_top_times['rank'] == fwd_rank].copy()
                 if fwd_day != "All Days":
                     current_times = current_times[current_times['Day_of_week'] == fwd_day]
+                    
                 if not current_times.empty:
                     days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
                     cols = st.columns(5)
@@ -1258,7 +1377,7 @@ def main():
                 equity_df_export, trades_df_export, retraining_df_export = run_forward_test(
                     df_for_export, training_weeks, trading_weeks, fwd_rank, fwd_day,
                     active_weights, contracts, starting_balance,
-                    fwd_exclude_fomc, fwd_exclude_earnings, fwd_predict_distance
+                    fwd_exclude_fomc, fwd_exclude_earnings, fwd_predict_distance, fwd_predict_distance_value
                 )
                 
                 if not trades_df_export.empty:
