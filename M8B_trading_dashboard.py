@@ -1229,11 +1229,11 @@ def main():
             fwd_predict_distance = st.checkbox("Predict Distance", value=False, key="fwd_predict_distance")
             if fwd_predict_distance and strategy == "Butterfly":
                 fwd_predict_distance_value = st.number_input(
-                    "Distance", min_value=1, max_value=100, value=18, step=1,
+                    "Distance", min_value=1, max_value=100, value=15, step=1,
                     key="fwd_predict_distance_value"
                 )
             else:
-                fwd_predict_distance_value = 18
+                fwd_predict_distance_value = 15
 
         with st.spinner("Running forward test simulation..."):
             df_for_fwd = df.copy()
