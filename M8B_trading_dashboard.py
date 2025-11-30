@@ -652,10 +652,15 @@ def main():
     [data-testid="stSidebar"] .stSlider > div > div {
         background: linear-gradient(to right, #ff4444 0%, #ffff00 50%, #44ff44 100%);
     }
+    [data-testid="stSidebar"] .stSlider div[data-testid="stThumbValue"] {
+        color: #00008B !important;
+    }
+    [data-testid="stSidebar"] .stSlider [data-baseweb="slider"] div {
+        color: #00008B !important;
+    }
     .metric-value { font-size: 24px; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
-
 
     # Initialize ALL session state variables FIRST, before any UI elements
     if 'exclude_fomc' not in st.session_state:
